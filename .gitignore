@@ -1,0 +1,29 @@
+# Secrets — never commit. `.env.example` is committed instead.
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Django local state
+db.sqlite3
+/media/
+/staticfiles/
+/.cache/
+
+# Planning material is local only (owner decision 2026-10-27): the spec team
+# (.claude/), CLAUDE.md, and the docs/ and specs/ working files never go into the
+# submission repo. Assumptions and design notes reach the evaluator via the README.
+.claude/
+CLAUDE.md
+/docs/
+/specs/
+
+# IDE / editor
+.idea/
+.vscode/
