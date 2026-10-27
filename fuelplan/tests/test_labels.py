@@ -150,15 +150,21 @@ class LocationLabelTests(OfflineTestCase):
 class GeocodingIsolationTests(OfflineTestCase):
     """FR-17: Geoapify is called only by the owner command, never by the import or requests."""
 
-    def test_geocoding_client_and_transport_are_used_only_by_the_owner_command(self) -> None:
+    def test_geoapify_client_only_in_owner_command_and_transport_only_there_and_in_routing(
+        self,
+    ) -> None:
         checked = [*FUELPLAN_DIR.glob("*.py"), *FUELPLAN_DIR.glob("management/commands/*.py")]
         allowed = {"geocoding.py", "http.py", "geocode_stations.py"}
+        # The OSRM client shares the transport (spec 01 §8 #1), never the Geoapify client.
+        transport_users = {"routing.py"}
         for path in checked:
             if path.name in allowed:
                 continue
             with self.subTest(module=path.name):
                 names = _imported_names(path)
                 self.assertNotIn("GeoapifyBatchClient", names)
+                if path.name in transport_users:
+                    continue
                 self.assertNotIn("fuelplan.http", names)
                 self.assertNotIn(".http", names)
                 self.assertNotIn("HttpClientTransport", names)
