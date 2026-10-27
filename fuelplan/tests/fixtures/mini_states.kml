@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document><Folder>
+<Placemark>
+<ExtendedData><SchemaData schemaUrl="#s">
+<SimpleData name="STUSPS">KS</SimpleData>
+<SimpleData name="NAME">Kansas</SimpleData>
+</SchemaData></ExtendedData>
+<MultiGeometry>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>-100.0,38.0,0.0 -99.0,38.0,0.0 -99.0,39.0,0.0 -100.0,39.0,0.0 -100.0,38.0,0.0</coordinates></LinearRing></outerBoundaryIs></Polygon>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>-97.1234567,37.0000004,0.0 -96.0,37.0,0.0 -96.0,37.5,0.0 -96.0000001,37.5000001,0.0 -97.1234567,37.5,0.0 -97.1234567,37.0000004,0.0</coordinates></LinearRing></outerBoundaryIs></Polygon>
+</MultiGeometry>
+</Placemark>
+<Placemark>
+<ExtendedData><SchemaData schemaUrl="#s">
+<SimpleData name="STUSPS">DC</SimpleData>
+<SimpleData name="NAME">District of Columbia</SimpleData>
+</SchemaData></ExtendedData>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>-77.1,38.8 -76.9,38.8 -76.9,39.0 -77.1,39.0</coordinates></LinearRing></outerBoundaryIs></Polygon>
+</Placemark>
+<Placemark>
+<ExtendedData><SchemaData schemaUrl="#s">
+<SimpleData name="STUSPS">PR</SimpleData>
+<SimpleData name="NAME">Puerto Rico</SimpleData>
+</SchemaData></ExtendedData>
+<Polygon><outerBoundaryIs><LinearRing><coordinates>-67.0,18.0,0.0 -66.0,18.0,0.0 -66.0,18.5,0.0 -67.0,18.0,0.0</coordinates></LinearRing></outerBoundaryIs></Polygon>
+</Placemark>
+</Folder></Document>
+</kml>

@@ -2,7 +2,7 @@
 
 import csv
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -87,7 +87,14 @@ def parse_row(raw: dict[str, str]) -> FuelRow | None:
 def read_records(path: Path) -> Iterator[dict[str, str]]:
     """Yield raw records after checking the header; a BOM is tolerated."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != EXPECTED_HEADER:
-            raise CsvHeaderError(f"unexpected header {reader.fieldnames!r} in {path}")
-        yield from reader
+        yield from parse_records(handle, path=path)
+
+
+def parse_records(lines: Iterable[str], *, path: Path) -> Iterator[dict[str, str]]:
+    """Yield raw records from CSV text already read from `path` (named in errors only)."""
+    reader = csv.DictReader(lines)
+    if reader.fieldnames is None:
+        raise CsvHeaderError(f"{path} is empty")
+    if reader.fieldnames != EXPECTED_HEADER:
+        raise CsvHeaderError(f"unexpected header {reader.fieldnames!r} in {path}")
+    yield from reader

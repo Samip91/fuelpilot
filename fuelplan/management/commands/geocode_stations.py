@@ -16,7 +16,6 @@ Credits are protected in three ways:
 import argparse
 import csv
 import fcntl
-import io
 import json
 import os
 import re
@@ -31,30 +30,22 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from fuelplan.fuel_csv import CsvHeaderError, parse_row, read_records
 from fuelplan.geocoding import (
+    LOCATION_FILE_COLUMNS,
     MAX_BATCH_SIZE,
     GeoapifyBatchClient,
     GeocodeResult,
     GeocodingError,
     JobFetch,
+    LocationFileError,
     match_results,
+    parse_location_rows,
 )
 from fuelplan.http import HttpClientTransport, Transport
 from fuelplan.regions import is_in_service_area
 
 DEFAULT_CSV = Path(settings.BASE_DIR) / "data" / "raw" / "fuel-prices.csv"
 DEFAULT_OUT = Path(settings.BASE_DIR) / "data" / "station_locations.csv"
-OUTPUT_COLUMNS = [
-    "address_key",
-    "lat",
-    "lon",
-    "result_type",
-    "confidence",
-    "state_code",
-    "source",
-    "attribution",
-    "license",
-    "source_url",
-]
+OUTPUT_COLUMNS = LOCATION_FILE_COLUMNS  # shared with import_fuel_stations
 SOURCE = "geoapify"
 
 # Credits (FACTS: 0.5 per address, 1 per job creation, 1 per result request). Whether a
@@ -251,15 +242,10 @@ def read_done_keys(out_path: Path) -> set[str]:
             f"{out_path} does not end with a newline, so its last row may be cut off; "
             "remove that row, then rerun with --resume"
         )
-    reader = csv.DictReader(io.StringIO(content, newline=""))
-    if reader.fieldnames != OUTPUT_COLUMNS:
-        raise CommandError(
-            f"{out_path} does not have the expected header {','.join(OUTPUT_COLUMNS)}"
-        )
-    rows = list(reader)
-    # DictReader marks a row with too many fields with a None key, too few with None values.
-    if any(None in row or None in row.values() for row in rows):
-        raise CommandError(f"{out_path} has a row with the wrong number of columns")
+    try:
+        rows = parse_location_rows(content, path=out_path)
+    except LocationFileError as error:
+        raise CommandError(str(error)) from error
     return {row["address_key"] for row in rows}
 
 

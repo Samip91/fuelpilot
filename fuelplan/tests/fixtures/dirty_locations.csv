@@ -1,0 +1,12 @@
+address_key,lat,lon,result_type,confidence,state_code,source,attribution,license,source_url
+100 MAIN ST|SPRINGFIELD|IL,39.81000,-89.65000,amenity,0.95,IL,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+200 OAK AVE|COLUMBUS|OH,39.97000,-83.00000,building,0.95,oh,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+"I-70, EXIT 10|COLUMBUS|OH",39.97000,-83.00000,street,0.95,OH,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+300 ELM ST|SPRINGFIELD|IL,39.81000,-89.65000,city,0.95,IL,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+400 PINE RD|COLUMBUS|OH,,,,0.95,OH,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+1 DUP RD|SPRINGFIELD|IL,39.81000,-89.65000,building,0.95,IL,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+2 DUP RD|SPRINGFIELD|IL,39.82000,-89.66000,building,0.95,IL,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+3 DUP RD|SPRINGFIELD|IL,39.81000,-89.65000,building,0.95,IL,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+5 BORDER RD|COLUMBUS|OH,39.97000,-83.00000,building,0.95,OH,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+13 Z ST|COLUMBUS|OH,39.97000,-83.00000,building,0.95,PA,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
+14 Z ST|COLUMBUS|OH,39.97000,-83.00000,building,0.95,OH,geoapify,© OpenStreetMap contributors,Open Database License,https://www.openstreetmap.org/copyright
