@@ -1,0 +1,10 @@
+line-length = 100
+target-version = "py312"
+extend-exclude = ["fuelplan/migrations"]
+
+[lint]
+# pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify, Django
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "DJ"]
+
+[format]
+quote-style = "double"
