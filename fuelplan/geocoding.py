@@ -5,11 +5,14 @@ A job is two steps on purpose: `submit` returns a job id the caller saves before
 waiting, and `fetch` can then be retried later for that id without paying for a new job.
 """
 
+import csv
+import io
 import json
 import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import SplitResult, urlencode, urlsplit
 
 from .http import ALLOWED_SCHEMES, HttpResponse, Transport, TransportError, redact_url
@@ -31,8 +34,28 @@ PLAIN_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1"})
 PLAIN_HTTP_TOP_LABEL = "test"  # reserved for testing (RFC 2606), so never a real host
 
 
+# The station location file (`data/station_locations.csv`): written by `geocode_stations`
+# (or the dev placeholder), read by `import_fuel_stations`. Raw fields only (FR-17).
+LOCATION_FILE_COLUMNS = [
+    "address_key",
+    "lat",
+    "lon",
+    "result_type",
+    "confidence",
+    "state_code",
+    "source",
+    "attribution",
+    "license",
+    "source_url",
+]
+
+
 class GeocodingError(Exception):
     """The batch job could not be created, fetched or matched."""
+
+
+class LocationFileError(Exception):
+    """A station location file has the wrong header or a malformed row."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +193,22 @@ def match_results(*, texts: Sequence[str], items: Sequence[dict[str, object]]) -
         results=[_to_result(text, by_text[text]) for text in matched],
         unmatched_texts=[text for text in texts if text not in by_text],
     )
+
+
+def parse_location_rows(content: str, *, path: Path) -> list[dict[str, str]]:
+    """Rows of location-file text read from `path` (named in errors only)."""
+    reader = csv.DictReader(io.StringIO(content, newline=""))
+    if reader.fieldnames is None:
+        raise LocationFileError(f"{path} is empty")
+    if reader.fieldnames != LOCATION_FILE_COLUMNS:
+        raise LocationFileError(
+            f"{path} does not have the expected header {','.join(LOCATION_FILE_COLUMNS)}"
+        )
+    rows = list(reader)
+    # DictReader marks a row with too many fields with a None key, too few with None values.
+    if any(None in row or None in row.values() for row in rows):
+        raise LocationFileError(f"{path} has a row with the wrong number of columns")
+    return rows
 
 
 def require_safe_base_url(base_url: str) -> None:

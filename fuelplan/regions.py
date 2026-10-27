@@ -19,3 +19,17 @@ OUTSIDE_SERVICE_AREA: frozenset[str] = frozenset(
 def is_in_service_area(state_code: str) -> bool:
     """True for the lower 48 states and DC, the only area the planner serves."""
     return state_code.strip().upper() in LOWER_48_AND_DC
+
+
+# Every code a caller may send: anything else ("XX") is bad input (400), not "unsupported".
+KNOWN_REGION_CODES: frozenset[str] = LOWER_48_AND_DC | OUTSIDE_SERVICE_AREA
+
+# (lat_min, lat_max, lon_min, lon_max) around the lower 48 + DC: a cheap sanity check for
+# station points, never the service-area test itself (that is the boundary polygon).
+LOWER_48_BBOX: tuple[float, float, float, float] = (24.0, 49.5, -125.0, -66.5)
+
+
+def is_inside_lower_48_bbox(*, latitude: float, longitude: float) -> bool:
+    """True if the point lies in the rough box around the lower 48 + DC."""
+    lat_min, lat_max, lon_min, lon_max = LOWER_48_BBOX
+    return lat_min <= latitude <= lat_max and lon_min <= longitude <= lon_max

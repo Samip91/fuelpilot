@@ -32,3 +32,6 @@ CLAUDE.md
 data/*.jobs.json
 data/*.jobs.json.tmp
 data/*.lock
+
+# Development-only placeholder station locations (build_location_data --placeholder-locations)
+data/dev/
