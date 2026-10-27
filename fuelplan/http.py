@@ -59,13 +59,58 @@ def redact_url(url: str) -> str:
     return _API_KEY_PATTERN.sub(r"\1***", url)
 
 
-def _shut_down(sock: socket.socket, expired: threading.Event) -> None:
-    """Watchdog action: mark the deadline as passed and unblock any pending read."""
-    expired.set()
-    # The plain socket shutdown (not SSLSocket's override) ends the stream without
-    # touching TLS state that the reading thread is still using.
-    with contextlib.suppress(OSError):  # the request already finished and closed it
-        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+def require_http_base_url(url: str) -> str:
+    """A configured base URL, checked once: http(s), a host, no query, fragment or user info.
+
+    Returns it without a trailing "/". The error never echoes the URL, because a bad
+    one may carry a username or password.
+    """
+    try:
+        parts = urlsplit(url.strip())
+        hostname = parts.hostname
+        _ = parts.port  # raises ValueError for a port that is not a number
+    except ValueError:
+        raise ValueError("must be an http(s) URL with a host") from None
+    if parts.scheme not in ALLOWED_SCHEMES or not hostname:
+        raise ValueError("must be an http(s) URL with a host")
+    # Checked on the text: "https://x/?" has an empty query but still a "?".
+    if "?" in url or "#" in url or "@" in parts.netloc:
+        raise ValueError("must not contain a query, fragment, username or password")
+    return url.strip().rstrip("/")
+
+
+class _Watchdog:
+    """Shuts the socket down when the total deadline passes, unless the request is over.
+
+    The lock and `closed` flag make "finish the request" and "fire" exclusive, so a
+    timer that fires late can never shut down a socket number that was reused.
+    """
+
+    def __init__(self, sock: socket.socket, *, after_s: float) -> None:
+        self.expired = threading.Event()
+        self._lock = threading.Lock()
+        self._closed = False
+        self._timer = threading.Timer(after_s, self._fire, args=(sock,))
+        self._timer.daemon = True
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def close(self) -> None:
+        """Called when the request ends; after this the watchdog never touches the socket."""
+        with self._lock:
+            self._closed = True
+        self._timer.cancel()
+
+    def _fire(self, sock: socket.socket) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.expired.set()
+            # The plain socket shutdown (not SSLSocket's override) ends the stream without
+            # touching TLS state that the reading thread is still using.
+            with contextlib.suppress(OSError):  # the peer already closed the connection
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
 
 
 class HttpClientTransport:
@@ -74,7 +119,8 @@ class HttpClientTransport:
     The total deadline is hard: a watchdog timer shuts the socket down when it
     passes, so a server that drips one byte at a time cannot stretch the call.
     Redirects are never followed, so a 3xx cannot move a request to another host.
-    DNS resolution happens inside `connect()` and is not bounded by the deadline.
+    TCP and TLS setup are bounded by the connect timeout (never above the total one);
+    DNS resolution happens inside `connect()` and is not bounded by either deadline.
     """
 
     def request(
@@ -94,26 +140,26 @@ class HttpClientTransport:
         connection_class = (
             http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
         )
-        connection = connection_class(parts.hostname, parts.port, timeout=connect_timeout_s)
+        connection = connection_class(
+            parts.hostname, parts.port, timeout=min(connect_timeout_s, total_timeout_s)
+        )
         target = parts.path or "/"
         if parts.query:
             target = f"{target}?{parts.query}"
         deadline = time.monotonic() + total_timeout_s
-        expired = threading.Event()
-        watchdog: threading.Timer | None = None
+        watchdog: _Watchdog | None = None
         try:
             connection.connect()
             remaining = deadline - time.monotonic()
             if remaining <= 0 or connection.sock is None:
                 raise TransportTimeout(f"timed out connecting to {redact_url(url)}")
-            watchdog = threading.Timer(remaining, _shut_down, args=(connection.sock, expired))
-            watchdog.daemon = True
+            watchdog = _Watchdog(connection.sock, after_s=remaining)
             watchdog.start()
             connection.sock.settimeout(remaining)
             connection.request(method, target, body=body, headers=headers or {})
             response = connection.getresponse()
             payload = self._read_body(connection, response, deadline=deadline, max_bytes=max_bytes)
-            if expired.is_set():  # a shut-down socket can look like a normal end of body
+            if watchdog.expired.is_set():  # a shut-down socket can look like a normal end
                 raise TransportTimeout("response not complete before the deadline")
             return HttpResponse(
                 status=response.status,
@@ -123,14 +169,14 @@ class HttpClientTransport:
         except TimeoutError as error:
             raise TransportTimeout(f"timed out calling {redact_url(url)}") from error
         except (OSError, http.client.HTTPException) as error:
-            if expired.is_set():
+            if watchdog is not None and watchdog.expired.is_set():
                 raise TransportTimeout(
                     f"response from {redact_url(url)} not complete before the deadline"
                 ) from error
             raise TransportError(f"failed calling {redact_url(url)}: {error}") from error
         finally:
             if watchdog is not None:
-                watchdog.cancel()
+                watchdog.close()
             connection.close()
 
     @staticmethod

@@ -6,6 +6,8 @@ from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
+from fuelplan.http import require_http_base_url
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -33,6 +35,15 @@ def _env_positive_int(name: str, default: int) -> int:
     if not (raw.isascii() and raw.isdecimal()) or int(raw) < 1:
         raise ImproperlyConfigured(f"{name} must be a whole number of at least 1, got {raw!r}.")
     return int(raw)
+
+
+def _env_base_url(name: str, default: str) -> str:
+    """A routing base URL from the env, checked once at startup (FR-12); blank means default."""
+    raw = os.environ.get(name, "").strip() or default
+    try:
+        return require_http_base_url(raw)
+    except ValueError as error:
+        raise ImproperlyConfigured(f"{name} {error}.") from None
 
 
 DEBUG = _env_bool("FUELPILOT_DEBUG", default=False)
@@ -111,10 +122,12 @@ REST_FRAMEWORK = {
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": [],
-    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle"],
+    # The throttle is set on the POST view only, so other pages never share its bucket.
     "DEFAULT_THROTTLE_RATES": {"anon": "30/min"},
     # 0 = use REMOTE_ADDR; None would trust a spoofable X-Forwarded-For header.
     "NUM_PROXIES": 0,
+    # Every exception inside an API view becomes the JSON error envelope (§7a).
+    "EXCEPTION_HANDLER": "fuelplan.errors.api_exception_handler",
 }
 
 LANGUAGE_CODE = "en-us"
@@ -125,9 +138,9 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # FuelPilot settings (spec 01 §11).
-FUELPILOT_ROUTING_BASE_URL = os.environ.get(
-    "FUELPILOT_ROUTING_BASE_URL", "https://router.project-osrm.org"
-).rstrip("/")
+FUELPILOT_ROUTING_BASE_URL = _env_base_url(
+    "FUELPILOT_ROUTING_BASE_URL", default="https://router.project-osrm.org"
+)
 FUELPILOT_ROUTING_CONNECT_TIMEOUT_S = _env_seconds("FUELPILOT_ROUTING_CONNECT_TIMEOUT_S", 3)
 FUELPILOT_ROUTING_READ_TIMEOUT_S = _env_seconds("FUELPILOT_ROUTING_READ_TIMEOUT_S", 10)
 FUELPILOT_PLAN_TTL_S = _env_positive_int("FUELPILOT_PLAN_TTL_S", default=604_800)

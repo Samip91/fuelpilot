@@ -78,6 +78,14 @@ PRINT_GEOAPIFY = (
     " s.GEOAPIFY_CONNECT_TIMEOUT_S, s.GEOAPIFY_TOTAL_TIMEOUT_S)",
 )
 
+PRINT_ROUTING = (
+    "shell",
+    "--no-imports",
+    "-c",
+    "from django.conf import settings as s; print(s.FUELPILOT_ROUTING_BASE_URL,"
+    " s.FUELPILOT_ROUTING_CONNECT_TIMEOUT_S, s.FUELPILOT_ROUTING_READ_TIMEOUT_S)",
+)
+
 
 class SecureDefaultsTests(OfflineTestCase):
     def test_debug_is_off_when_the_flag_is_unset(self) -> None:
@@ -150,3 +158,39 @@ class SecureDefaultsTests(OfflineTestCase):
         )
 
         self.assertEqual(result.returncode, 0)
+
+
+class RoutingSettingsTests(OfflineTestCase):
+    """FR-12 / TC-10 startup half: the OSRM base URL is parsed once, timeouts are clamped."""
+
+    def test_routing_settings_default_normalise_and_clamp(self) -> None:
+        cases = {
+            # (base URL, connect, total) env values -> printed settings
+            ("", "", ""): "https://router.project-osrm.org 3 10",
+            ("   ", "0", "99"): "https://router.project-osrm.org 1 30",
+            ("http://osrm.test:5000/", "²", " 5 "): "http://osrm.test:5000 3 5",
+        }
+        for (base_url, connect, total), expected in cases.items():
+            env = {
+                **SECRET,
+                "FUELPILOT_ROUTING_BASE_URL": base_url,
+                "FUELPILOT_ROUTING_CONNECT_TIMEOUT_S": connect,
+                "FUELPILOT_ROUTING_READ_TIMEOUT_S": total,
+            }
+            with self.subTest(env=(base_url, connect, total)):
+                result = _manage(*PRINT_ROUTING, env_overrides=env)
+
+                self.assertEqual(result.stdout.strip(), expected, result.stderr)
+
+    def test_startup_refuses_a_routing_base_url_with_a_query_or_another_scheme(self) -> None:
+        for url in ("ftp://x", "https://x/?a=1", "https://x/#f", "https://user:pw@x"):
+            with self.subTest(url=url):
+                result = _manage(
+                    "check", env_overrides={**SECRET, "FUELPILOT_ROUTING_BASE_URL": url}
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "ImproperlyConfigured: FUELPILOT_ROUTING_BASE_URL must", result.stderr
+                )
+                self.assertNotIn("user:pw", result.stderr)
