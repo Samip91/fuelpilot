@@ -1,16 +1,20 @@
-"""The API edge: `POST /api/v1/fuel-plans`, the map stub and the JSON 404 for other paths.
+"""The API edge: `POST /api/v1/fuel-plans`, the map page and the JSON 404 for other paths.
 
-The view only checks and parses the request, hands a validated `PlanRequest` and a
+The POST view only checks and parses the request, hands a validated `PlanRequest` and a
 fresh `CallBudget` to the planner, and adds the per-response `map_url` and `meta`.
 Every error it raises becomes the §7a envelope through `errors.api_exception_handler`.
 """
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import BinaryIO
 from uuid import UUID
 
-from django.http import HttpRequest, JsonResponse
+from django.core.cache import caches
+from django.db import DatabaseError
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.exceptions import ParseError
@@ -22,11 +26,20 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, BaseThrottle
 from rest_framework.views import APIView
 
-from .errors import BODY_KEY, InvalidRequest, error_response, not_found_response
+from .errors import (
+    BODY_KEY,
+    InvalidRequest,
+    error_response,
+    internal_error_response,
+    not_found_response,
+)
+from .map_page import PlanShapeError, build_map_page
 from .parsing import whole_number
-from .planner import build_trip_planner
+from .planner import build_trip_planner, planobj_cache_key
 from .routing import CALL_LIMIT, CallBudget
 from .serializers import parse_plan_request, response_body
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 10_240  # NFR-10, checked before the body is read
 # Django and DRF read Content-Length with int(), which fails beyond 4,300 digits (even
@@ -131,11 +144,14 @@ class FuelPlanView(APIView):
 
 
 MAP_METHODS = ["GET", "HEAD"]
+# Sends the page's origin as Referer to the OSM tile server, which its tile policy asks for
+# (spec 02 NFR-6); Django's default `same-origin` would send nothing to another site.
+MAP_REFERRER_POLICY = "strict-origin-when-cross-origin"
 
 
-@csrf_exempt  # a POST here must get the JSON 405, not a CSRF 403
-def fuel_plan_map(request: HttpRequest, plan_id: UUID) -> JsonResponse:
-    """Stub of the map page (FR-33): spec 02 replaces this view, not the route."""
+@csrf_exempt  # read-only; a POST here must get the JSON 405, not a CSRF 403
+def fuel_plan_map(request: HttpRequest, plan_id: UUID) -> HttpResponse:
+    """The map page of a saved plan (spec 02): one cache read, 0 routing calls, no writes."""
     if request.method not in MAP_METHODS:
         return error_response(
             code="method_not_allowed",
@@ -144,6 +160,22 @@ def fuel_plan_map(request: HttpRequest, plan_id: UUID) -> JsonResponse:
             status=405,
             headers={"Allow": ", ".join(MAP_METHODS)},
         )
+    try:
+        saved_plan = caches["default"].get(planobj_cache_key(str(plan_id)))
+        if saved_plan is None:  # unknown, expired or culled: 01's 404, never `raise Http404`
+            return plan_not_found_response(plan_id)
+        page = build_map_page(saved_plan)
+    except (DatabaseError, PlanShapeError):
+        # Caught here, not left to handler500, so even DEBUG on never shows a traceback page.
+        logger.exception("Map page for plan %s could not be built", plan_id)
+        return internal_error_response()
+    # Without the request: no context processor runs, so no session, CSRF cookie or query.
+    html = render_to_string("fuelplan/map.html", {"page": page})
+    return HttpResponse(html, headers={"Referrer-Policy": MAP_REFERRER_POLICY})
+
+
+def plan_not_found_response(plan_id: UUID) -> JsonResponse:
+    """01's 404 for a canonical plan id with no saved plan (spec 02 FR-9)."""
     return error_response(
         code="plan_not_found",
         message="No saved plan with this id; it may have expired. Send the trip again.",

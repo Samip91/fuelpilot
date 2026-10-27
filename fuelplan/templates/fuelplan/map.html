@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page.title }} · FuelPilot</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0 1rem; line-height: 1.35; color: #222; }
+  h1 { font-size: 1.4rem; margin: 0.6rem 0 0.2rem; }
+  h2 { font-size: 0.95rem; margin: 0.8rem 0 0.2rem; }
+  header p { margin: 0.15rem 0; }
+  header .total { font-size: 1.15rem; font-weight: bold; }
+  .notice, .warnings li, #tile-error { background: #fff4d6; border-left: 4px solid #e0a800; padding: 0.3rem 0.6rem; margin: 0.3rem 0; }
+  .warnings { list-style: none; margin: 0; padding: 0; }
+  main { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin: 0.6rem 0; }
+  #map { height: 55vh; min-height: 320px; }
+  .rows { list-style: none; margin: 0; padding: 0; max-height: 55vh; overflow-y: auto; }
+  .rows li { border-bottom: 1px solid #ddd; padding: 0.3rem 0; }
+  .rows p { margin: 0.1rem 0; }
+  .rows p:first-child { font-weight: bold; }
+  .pin { background: #1565c0; color: #fff; border: 2px solid #fff; border-radius: 50%; text-align: center; font: bold 12px/18px sans-serif; }
+  .pin.end { background: #2e7d32; border-radius: 3px; }
+  footer { font-size: 0.85rem; color: #444; border-top: 1px solid #ccc; margin: 1rem 0; }
+  footer p, footer li { margin: 0.15rem 0; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ page.title }}</h1>
+  {% for line in page.header_lines %}<p{% if forloop.first %} class="total"{% endif %}>{{ line }}</p>
+  {% endfor %}
+  {% if page.detours_notice %}<p class="notice">{{ page.detours_notice }}</p>{% endif %}
+  {% if page.warnings %}<ul class="warnings" aria-label="Warnings">
+    {% for warning in page.warnings %}<li>{{ warning }}</li>
+    {% endfor %}
+  </ul>{% endif %}
+  {% if page.zero_stop_message %}<p class="notice">{{ page.zero_stop_message }}</p>{% endif %}
+</header>
+<p id="tile-error" hidden>{{ page.tiles_failed_message }}</p>
+<noscript><p>{{ page.noscript_message }}</p></noscript>
+<main>
+  <div id="map" aria-label="Route map"></div>
+  <ol class="rows" aria-label="Start, fuel stops and finish">
+    {% for row in page.rows %}<li>
+      {% for line in row.lines %}<p>{{ line }}</p>
+      {% endfor %}
+    </li>
+    {% endfor %}
+  </ol>
+</main>
+<footer>
+  <h2>Notes</h2>
+  <ul>
+    {% for note in page.notes %}<li>{{ note }}</li>
+    {% endfor %}
+  </ul>
+  <p>{{ page.range_line }}</p>
+  <p>{{ page.legend }}</p>
+  <h2>Data and map credits</h2>
+  <ul>
+    {% for item in page.attribution %}<li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  <p>© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</p>
+  <p>Powered by <a href="https://www.geoapify.com/">Geoapify</a></p>
+  <p>Station data version: {{ page.dataset_version }}</p>
+</footer>
+{{ page.plan_data|json_script:"plan-data" }}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function () {
+  // Text above is complete without this script; it only draws the map.
+  const tileError = document.getElementById("tile-error");
+  const showTileError = () => { tileError.hidden = false; };  // one element: shown at most once
+  const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  if (!window.L) { showTileError(); return; }  // Leaflet blocked, offline or SRI mismatch
+
+  // Plan text only ever goes in through textContent, never as HTML.
+  const asText = (text) => {
+    const span = document.createElement("span");
+    span.textContent = text;
+    return span;
+  };
+
+  function drawMap(plan) {
+    const map = L.map("map");
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom: 19, attribution: OSM_ATTRIBUTION})
+      .on("tileerror", showTileError)
+      .addTo(map);
+    const layers = [L.geoJSON(plan.geometry)];
+    for (const point of plan.points) {
+      const isEnd = point.label === "S" || point.label === "F";
+      const icon = L.divIcon({className: isEnd ? "pin end" : "pin", html: asText(point.label), iconSize: [22, 22]});
+      layers.push(L.marker([point.lat, point.lon], {icon: icon}).bindPopup(asText(point.title)));
+    }
+    const everything = L.featureGroup(layers).addTo(map);
+    // maxZoom keeps a start = finish plan (a zero-area box) from zooming in all the way.
+    map.fitBounds(everything.getBounds(), {padding: [20, 20], maxZoom: 13});
+  }
+
+  try {
+    drawMap(JSON.parse(document.getElementById("plan-data").textContent));
+  } catch (error) {
+    showTileError();  // drawing failed; the text above is still correct
+  }
+})();
+</script>
+</body>
+</html>
