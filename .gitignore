@@ -27,3 +27,8 @@ CLAUDE.md
 # IDE / editor
 .idea/
 .vscode/
+
+# geocode_stations run state (local only)
+data/*.jobs.json
+data/*.jobs.json.tmp
+data/*.lock
