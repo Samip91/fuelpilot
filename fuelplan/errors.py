@@ -193,15 +193,66 @@ class InternalError(FuelPlanError):
     code = "internal_error"
     status = 500
 
-    def __init__(self, *, routing_calls: int | None = None) -> None:
+    def __init__(
+        self, *, routing_calls: int | None = None, message: str = INTERNAL_ERROR_MESSAGE
+    ) -> None:
         details: dict[str, JsonValue] = {}
         if routing_calls is not None:
             details["routing_calls"] = routing_calls
-        super().__init__(INTERNAL_ERROR_MESSAGE, details=details)
+        super().__init__(message, details=details)
 
 
 class CallBudgetExceeded(InternalError):
     """A fourth routing call was attempted (FR-10); its own class only for a specific log line."""
+
+
+STATION_DATA_MISSING_MESSAGE = (
+    "Station data not imported. Run `python manage.py import_fuel_stations`, "
+    "then restart the server."
+)
+
+
+class StationDataMissing(InternalError):
+    """No Station rows or no DatasetImport record (FR-43): the operator must run the import.
+
+    Still a 500 `internal_error` with `{}` details, but the message names the fix instead
+    of "try again later", which would never help.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(message=STATION_DATA_MISSING_MESSAGE)
+
+
+class NoFeasiblePlan(FuelPlanError):
+    """No plan keeps every leg within range among the candidates (FR-23, I7); never partial.
+
+    The serializer builds the message and the rounded detail strings; this class only
+    fixes the §7a code, status and detail keys.
+    """
+
+    code = "no_feasible_plan"
+    status = 422
+
+    def __init__(
+        self,
+        *,
+        message: str,
+        gap_from_mile: str,
+        gap_to_mile: str,
+        gap_leg_miles: str,
+        max_leg_miles: str,
+        hint: str,
+    ) -> None:
+        super().__init__(
+            message,
+            details={
+                "gap_from_mile": gap_from_mile,
+                "gap_to_mile": gap_to_mile,
+                "gap_leg_miles": gap_leg_miles,
+                "max_leg_miles": max_leg_miles,
+                "hint": hint,
+            },
+        )
 
 
 def error_response(

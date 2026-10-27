@@ -1,8 +1,8 @@
 """Spec 01 TC-1 (FR-1, FR-5, NFR-10), TC-5 (FR-6) and the "XX" half of TC-4.
 
-Build 2B ends at validation: a valid request reaches the planner seam
-(`views.plan_trip`), which these tests replace with a recording fake. The 200 halves
-(echo in `assumptions`, the 15-mi fixture route) close with the planner in 2C.
+These tests stop at validation: a valid request reaches the planner seam
+(`views.build_trip_planner`), which they replace with a recording fake. The 200 halves
+(echo in `assumptions`, the 15-mi fixture route) are in `test_plan_api.py`.
 """
 
 import json
@@ -10,13 +10,13 @@ from decimal import Decimal
 from unittest import mock
 
 from rest_framework.exceptions import ValidationError
-from rest_framework.response import Response
 
 from fuelplan.errors import InvalidRequest, flatten_errors
+from fuelplan.planner import PlanOutcome
 from fuelplan.routing import CALL_LIMIT
 from fuelplan.serializers import CityInput, PlanRequest, PointInput, parse_plan_request
 
-from .base import ApiTestCase, FakeTransport, OfflineTestCase, assert_envelope
+from .base import ApiTestCase, FakeTransport, OfflineTestCase, assert_envelope, stub_outcome
 
 CHICAGO = {"latitude": 41.85003, "longitude": -87.65005}
 DENVER = {"latitude": 39.73915, "longitude": -104.9847}
@@ -43,21 +43,21 @@ def _raw_start(literal: str) -> bytes:
 
 
 class SeamRecorder:
-    """Stands in for the 2C planner: records what the view hands over and answers 200."""
+    """Stands in for the planner: records what the view hands over and answers 200."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[PlanRequest, object]] = []
 
-    def __call__(self, *, plan_request: PlanRequest, budget: object) -> Response:
+    def plan(self, *, plan_request: PlanRequest, budget: object) -> PlanOutcome:
         self.calls.append((plan_request, budget))
-        return Response({"reached": "planner"})
+        return stub_outcome()
 
 
 class RequestValidationHttpTests(ApiTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.seam = SeamRecorder()
-        patcher = mock.patch("fuelplan.views.plan_trip", self.seam)
+        patcher = mock.patch("fuelplan.views.build_trip_planner", return_value=self.seam)
         patcher.start()
         self.addCleanup(patcher.stop)
         # No routing call may happen on any 400; the fake proves it (calls=0).

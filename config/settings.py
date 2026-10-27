@@ -104,6 +104,9 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        # Wait at most 2 s for a lock (cache writes and the call slot share the file), so
+        # the 2 s provider-slot wait stays a bound of about 4 s, not Python's 5 s default.
+        "OPTIONS": {"timeout": 2},
     }
 }
 
@@ -144,6 +147,8 @@ FUELPILOT_ROUTING_BASE_URL = _env_base_url(
 FUELPILOT_ROUTING_CONNECT_TIMEOUT_S = _env_seconds("FUELPILOT_ROUTING_CONNECT_TIMEOUT_S", 3)
 FUELPILOT_ROUTING_READ_TIMEOUT_S = _env_seconds("FUELPILOT_ROUTING_READ_TIMEOUT_S", 10)
 FUELPILOT_PLAN_TTL_S = _env_positive_int("FUELPILOT_PLAN_TTL_S", default=604_800)
+# FR-44 seam: a dotted path, not an env var; v1 ships only the no-op.
+FUELPILOT_DETOUR_VERIFIER = "fuelplan.verification.verify_detours_noop"
 GEOAPIFY_API_KEY = os.environ.get("GEOAPIFY_API_KEY", "").strip()
 # Owner-only batch geocoding (`geocode_stations`); its jobs are slower than one route call.
 GEOAPIFY_BASE_URL = (
