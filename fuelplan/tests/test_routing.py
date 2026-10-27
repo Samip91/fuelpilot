@@ -11,7 +11,6 @@ from unittest import mock
 from urllib.parse import parse_qsl, urlsplit
 
 from django.test import override_settings
-from rest_framework.response import Response
 
 from fuelplan.errors import (
     CallBudgetExceeded,
@@ -21,6 +20,7 @@ from fuelplan.errors import (
 )
 from fuelplan.http import ResponseTooLarge, TransportError, TransportTimeout, require_http_base_url
 from fuelplan.models import ProviderSlot
+from fuelplan.planner import PlanOutcome
 from fuelplan.routing import (
     MAX_ROUTE_BYTES,
     USER_AGENT,
@@ -34,7 +34,14 @@ from fuelplan.routing import (
     route_url,
 )
 
-from .base import ApiTestCase, FakeClock, FakeTransport, OfflineTestCase, assert_envelope
+from .base import (
+    ApiTestCase,
+    FakeClock,
+    FakeTransport,
+    OfflineTestCase,
+    assert_envelope,
+    stub_outcome,
+)
 
 START = (-87.65005, 41.85003)
 FINISH = (-104.9847, 39.73915)
@@ -88,6 +95,67 @@ def _fetch(client: RoutingClient, budget: CallBudget) -> OsrmRoute:
     return client.fetch_route(start=START, finish=FINISH, budget=budget)
 
 
+def provider_failure_rows() -> dict[str, tuple[object, int, str]]:
+    """TC-9: each OSRM outcome class → (queued reply or error, HTTP status, §7a code)."""
+
+    def body(payload: object) -> bytes:
+        return json.dumps(payload).encode()
+
+    def code(name: str, status: int = 400) -> tuple[int, bytes, dict]:
+        return (status, body({"code": name, "message": "provider text"}), {})
+
+    no_route_line = {"type": "LineString", "coordinates": [[-87.65, 41.85]]}
+    return {  # name: (reply, HTTP status, code)
+        "connect timeout": (TransportTimeout("connect"), 504, "routing_timeout"),
+        "slow body": (TransportTimeout("body"), 504, "routing_timeout"),
+        "429 Retry-After 120": (
+            (429, b"", {"Retry-After": "120"}),
+            503,
+            "routing_rate_limited",
+        ),
+        "429 without header": ((429, b"", {}), 503, "routing_rate_limited"),
+        "HTTP 500": ((500, b"oops", {}), 502, "routing_unavailable"),
+        "HTTP 503": ((503, b"busy", {}), 502, "routing_unavailable"),
+        "connection refused": (
+            _wrapped(ConnectionRefusedError()),
+            502,
+            "routing_unavailable",
+        ),
+        "DNS failure": (_wrapped(socket.gaierror("no host")), 502, "routing_unavailable"),
+        "TLS failure": (_wrapped(ssl.SSLError("bad cert")), 502, "routing_unavailable"),
+        "non-JSON 200": ((200, b"<html>", {}), 502, "routing_unavailable"),
+        "Ok with no routes": (
+            (200, body({**ok_route(), "routes": []}), {}),
+            502,
+            "routing_unavailable",
+        ),
+        "Ok with 1 point": (
+            (200, body(ok_route(geometry=no_route_line)), {}),
+            502,
+            "routing_unavailable",
+        ),
+        "Ok with NaN coordinates": (
+            (200, body(ok_route()).replace(b"-87.7", b"NaN"), {}),
+            502,
+            "routing_unavailable",
+        ),
+        "body over 8 MiB": (ResponseTooLarge("big"), 502, "routing_unavailable"),
+        "302 redirect": (
+            (302, b"", {"Location": "http://elsewhere/"}),
+            502,
+            "routing_unavailable",
+        ),
+        "418": ((418, b"teapot", {}), 502, "routing_unavailable"),
+        "NoRoute": (code("NoRoute"), 422, "no_route"),
+        "NoSegment": (code("NoSegment"), 422, "no_route"),
+        "InvalidQuery": (code("InvalidQuery"), 500, "internal_error"),
+        "InvalidUrl": (code("InvalidUrl"), 500, "internal_error"),
+        "TooBig": (code("TooBig"), 500, "internal_error"),
+        "DisabledDataset": (code("DisabledDataset"), 502, "routing_unavailable"),
+        "Weird": (code("Weird"), 502, "routing_unavailable"),
+    }
+
+
 class ProviderFailureMappingTests(OfflineTestCase):
     """TC-9 (FR-10, FR-11, AC-9): each provider outcome → its §7a status, 1 call, no retry."""
 
@@ -110,62 +178,7 @@ class ProviderFailureMappingTests(OfflineTestCase):
         return raised.exception, transport, budget
 
     def test_provider_failure_mapping(self) -> None:
-        def body(payload: object) -> bytes:
-            return json.dumps(payload).encode()
-
-        def code(name: str, status: int = 400) -> tuple[int, bytes, dict]:
-            return (status, body({"code": name, "message": "provider text"}), {})
-
-        no_route_line = {"type": "LineString", "coordinates": [[-87.65, 41.85]]}
-        rows = {  # name: (reply, HTTP status, code)
-            "connect timeout": (TransportTimeout("connect"), 504, "routing_timeout"),
-            "slow body": (TransportTimeout("body"), 504, "routing_timeout"),
-            "429 Retry-After 120": (
-                (429, b"", {"Retry-After": "120"}),
-                503,
-                "routing_rate_limited",
-            ),
-            "429 without header": ((429, b"", {}), 503, "routing_rate_limited"),
-            "HTTP 500": ((500, b"oops", {}), 502, "routing_unavailable"),
-            "HTTP 503": ((503, b"busy", {}), 502, "routing_unavailable"),
-            "connection refused": (
-                _wrapped(ConnectionRefusedError()),
-                502,
-                "routing_unavailable",
-            ),
-            "DNS failure": (_wrapped(socket.gaierror("no host")), 502, "routing_unavailable"),
-            "TLS failure": (_wrapped(ssl.SSLError("bad cert")), 502, "routing_unavailable"),
-            "non-JSON 200": ((200, b"<html>", {}), 502, "routing_unavailable"),
-            "Ok with no routes": (
-                (200, body({**ok_route(), "routes": []}), {}),
-                502,
-                "routing_unavailable",
-            ),
-            "Ok with 1 point": (
-                (200, body(ok_route(geometry=no_route_line)), {}),
-                502,
-                "routing_unavailable",
-            ),
-            "Ok with NaN coordinates": (
-                (200, body(ok_route()).replace(b"-87.7", b"NaN"), {}),
-                502,
-                "routing_unavailable",
-            ),
-            "body over 8 MiB": (ResponseTooLarge("big"), 502, "routing_unavailable"),
-            "302 redirect": (
-                (302, b"", {"Location": "http://elsewhere/"}),
-                502,
-                "routing_unavailable",
-            ),
-            "418": ((418, b"teapot", {}), 502, "routing_unavailable"),
-            "NoRoute": (code("NoRoute"), 422, "no_route"),
-            "NoSegment": (code("NoSegment"), 422, "no_route"),
-            "InvalidQuery": (code("InvalidQuery"), 500, "internal_error"),
-            "InvalidUrl": (code("InvalidUrl"), 500, "internal_error"),
-            "TooBig": (code("TooBig"), 500, "internal_error"),
-            "DisabledDataset": (code("DisabledDataset"), 502, "routing_unavailable"),
-            "Weird": (code("Weird"), 502, "routing_unavailable"),
-        }
+        rows = provider_failure_rows()
         self.assertEqual(len(rows), 23)
         for name, (reply, status, error_code) in rows.items():
             with self.subTest(row=name):
@@ -453,13 +466,15 @@ class CallCountTests(ApiTestCase):
 
     def _route_through_the_seam(self, *, calls: int = 1):
         """A stand-in planner that makes `calls` route calls with the view's budget."""
+        client = self.client_under_test
 
-        def seam(*, plan_request: object, budget: CallBudget) -> Response:
-            for _ in range(calls):
-                _fetch(self.client_under_test, budget)
-            return Response({"routing_calls": budget.used})
+        class CallingPlanner:
+            def plan(self, *, plan_request: object, budget: CallBudget) -> PlanOutcome:
+                for _ in range(calls):
+                    _fetch(client, budget)
+                return stub_outcome(routing_calls=budget.used)
 
-        return mock.patch("fuelplan.views.plan_trip", seam)
+        return mock.patch("fuelplan.views.build_trip_planner", return_value=CallingPlanner())
 
     def test_call_count_per_path(self) -> None:
         # Cold call at client level: exactly 1.

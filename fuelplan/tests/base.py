@@ -3,13 +3,18 @@
 import json
 import socket
 from dataclasses import dataclass, field
+from datetime import UTC, timedelta
 from unittest import mock
 
 from django.core.cache import cache
+from django.db import connection
 from django.http import HttpResponse as DjangoResponse
 from django.test import TestCase
+from django.utils import timezone
+from rest_framework.throttling import AnonRateThrottle
 
 from fuelplan.http import HttpResponse
+from fuelplan.planner import Meta, PlanOutcome
 
 LOOPBACK_HOST = "127.0.0.1"
 PLAN_URL = "/api/v1/fuel-plans"
@@ -165,19 +170,80 @@ def assert_envelope(test: TestCase, response: DjangoResponse, *, status: int, co
     return body["error"]["details"]
 
 
+STUB_PLAN_ID = "00000000-0000-4000-8000-000000000000"
+CACHE_TABLE = "fuelpilot_cache"
+CACHE_KEY_PREFIX = ":1:"  # Django's default key prefix and version
+
+
+def stub_outcome(*, routing_calls: int = 0) -> PlanOutcome:
+    """A minimal planner answer for tests that stop at the view (validation, call counts)."""
+    return PlanOutcome(
+        plan_id=STUB_PLAN_ID,
+        body={"plan_id": STUB_PLAN_ID, "reached": "planner"},
+        meta=Meta(routing_calls=routing_calls, route_cache="miss", plan_cache="miss"),
+    )
+
+
+def throttle_cache_key() -> str:
+    """The cache key DRF's anonymous throttle uses for test requests from 127.0.0.1."""
+    return AnonRateThrottle.cache_format % {"scope": "anon", "ident": LOOPBACK_HOST}
+
+
+def cache_keys() -> set[str]:
+    """Every key in the database cache, without Django's ":1:" prefix (routes, plans...)."""
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT cache_key FROM {CACHE_TABLE}")
+        return {key.removeprefix(CACHE_KEY_PREFIX) for (key,) in cursor.fetchall()}
+
+
+def ttl_of(key: str) -> float:
+    """Seconds until `key` (without the ":1:" prefix) expires in the database cache."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT expires FROM {CACHE_TABLE} WHERE cache_key = %s", [CACHE_KEY_PREFIX + key]
+        )
+        (expires,) = cursor.fetchone()
+    if timezone.is_naive(expires):  # SQLite returns the stored UTC time without a zone
+        expires = timezone.make_aware(expires, UTC)
+    return (expires - timezone.now()).total_seconds()
+
+
+def expire_cache_key(key: str) -> None:
+    """Make `key` look expired, as if its TTL had passed (FR-37 route expiry)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"UPDATE {CACHE_TABLE} SET expires = %s WHERE cache_key = %s",
+            [
+                connection.ops.adapt_datetimefield_value(timezone.now() - timedelta(seconds=1)),
+                CACHE_KEY_PREFIX + key,
+            ],
+        )
+
+
 class ApiTestCase(OfflineTestCase):
     """HTTP tests of the plan endpoint.
 
     Our POST throttle (30/min per IP) keeps its counts in the cache, and every test
-    request comes from 127.0.0.1. So each `post_*` call empties the cache first, and
-    only the throttle test sends requests without that reset.
+    request comes from 127.0.0.1. So each `post_*` call empties the cache first; with
+    `keep_cache=True` only the throttle count is reset, so saved routes and plans stay.
+    The throttle test sends requests without either reset.
     """
 
     def post_raw(
-        self, body: bytes, *, content_type: str = "application/json", **extra: str
+        self,
+        body: bytes,
+        *,
+        content_type: str = "application/json",
+        keep_cache: bool = False,
+        **extra: str,
     ) -> DjangoResponse:
-        cache.clear()
+        if keep_cache:
+            cache.delete(throttle_cache_key())
+        else:
+            cache.clear()
         return self.client.generic("POST", PLAN_URL, body, content_type=content_type, **extra)
 
-    def post_json(self, payload: object, **extra: str) -> DjangoResponse:
-        return self.post_raw(json.dumps(payload).encode(), **extra)
+    def post_json(
+        self, payload: object, *, keep_cache: bool = False, **extra: str
+    ) -> DjangoResponse:
+        return self.post_raw(json.dumps(payload).encode(), keep_cache=keep_cache, **extra)

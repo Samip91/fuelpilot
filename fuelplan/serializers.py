@@ -1,22 +1,38 @@
-"""Strict request validation for `POST /api/v1/fuel-plans` (spec 01 §7a, FR-1, FR-5, FR-6).
+"""Both ends of `POST /api/v1/fuel-plans`: strict request validation and the response body.
 
-DRF's own `FloatField` and `CharField` are too lenient here: they accept "41.85" and
-`true` as numbers and turn 123 into "123". The small fields below accept exactly the
-JSON types the spec allows, and every message names the fix. Unknown keys are reported
-one by one instead of being silently dropped.
+Request (spec 01 §7a, FR-1, FR-5, FR-6): DRF's own `FloatField` and `CharField` are too
+lenient here: they accept "41.85" and `true` as numbers and turn 123 into "123". The small
+fields below accept exactly the JSON types the spec allows, and every message names the
+fix. Unknown keys are reported one by one instead of being silently dropped.
+
+Response (§7a, FR-24 to FR-31, I4): the planner hands over unrounded Decimals; this is the
+only place they are rounded to the shown strings, each value exactly once.
 """
 
 import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal
+from typing import Literal
 
 from rest_framework import serializers
 
-from .errors import BODY_KEY, InvalidRequest
-from .locations import normalise_state
+from .errors import BODY_KEY, InvalidRequest, JsonValue, NoFeasiblePlan
+from .geo import LonLat, miles_from_meters
+from .locations import ResolvedEndpoint, normalise_state
+from .optimizer import (
+    MILES_PER_GALLON,
+    PLANNING_TANK_GALLONS,
+    FuelGap,
+    FuelPlan,
+    PlannedStop,
+    after_purchase_range_miles,
+    first_leg_range_miles,
+    hard_max_range_miles,
+)
 from .regions import KNOWN_REGION_CODES
+from .stations import StationIndex
 
 CITY_MAX_CHARS = 100  # NFR-10
 STATE_MAX_CHARS = 10  # anything longer is not a code; "Illinois" still gets the code hint
@@ -298,3 +314,351 @@ def parse_plan_request(data: object) -> PlanRequest:
     serializer = PlanRequestSerializer(data=data)
     serializer.is_valid(raise_exception=True)
     return serializer.plan_request
+
+
+# --- The response body (spec 01 §7a) -----------------------------------------------------
+
+TENTH = Decimal("0.1")
+CENT = Decimal("0.01")
+POSITION_DECIMALS = 5  # GeoJSON positions: JSON numbers at 5 dp, [lon, lat]
+FAR_SNAP_MILES = Decimal("1.0")  # FR-42: warn only when the shown value is above this
+MAX_DETOUR_TEXT = "5.0"
+
+PRICE_RULE = "lowest listed CSV price per station among rows with a resolved location"
+PRICE_SOURCE = "provided CSV snapshot, not live"
+ATTRIBUTION = [
+    "Routing: OSRM, © OpenStreetMap contributors (ODbL)",
+    "Station locations: Geoapify, © OpenStreetMap contributors (ODbL)",
+    "Places: GeoNames (CC BY 4.0)",
+    "Boundaries: US Census Bureau",
+]
+DETOUR_NOTE = (
+    "Detours are the extra miles to leave the route, reach the station and come back, "
+    "estimated as twice the straight-line distance (not measured on roads), so a real leg "
+    "can be slightly longer than planned; keep a reserve."
+)
+PRICE_NOTE = "Prices are the provided CSV snapshot, not live."
+MONEY_NOTE = (
+    "Each line cost is rounded to the cent and the total is rounded once, "
+    "so they can differ by a few cents."
+)
+ARRIVAL_ROUNDING_NOTE = (
+    "Fuel on arrival is rounded down and fuel burned to the nearest 0.1, so start + bought "
+    "− burned can differ from the finish figure by 0.1 gal."
+)
+WHOLE_GALLON_NOTE = (
+    "Fill stops buy whole gallons rounded down (the brim takes under 1 gallon more); "
+    "other stops buy just enough, rounded up."
+)
+MERGED_STOP_NOTE = (
+    "A planned stop was skipped: the whole gallons bought at the previous stop already "
+    "reach the next stop or the finish."
+)
+MERGED_LEG_NOTE = (  # spec 01 §15, whole-gallon replay
+    "A leg can be longer than the after_purchase planning range because a stop was merged "
+    "during rounding; it stays within hard_max."
+)
+SAME_POINT_NOTE = (
+    "Start and finish are the same point (to 5 decimal places), so there is no route to "
+    "drive and no fuel to buy."
+)
+NO_USABLE_FUEL_MESSAGE = (
+    "Cannot plan this trip among the stations checked: start fuel equals reserve_gallons, "
+    "so the truck has no usable fuel to leave the start."
+)
+
+DetourMethod = Literal["straight_line_estimate", "measured", "mixed"]
+
+
+def miles_text(miles: Decimal) -> str:
+    """Miles as shown: 0.1, ROUND_HALF_UP (§7a)."""
+    return str(miles.quantize(TENTH, rounding=ROUND_HALF_UP))
+
+
+def arrival_text(gallons: Decimal) -> str:
+    """Fuel on arrival, rounded down to 0.1, so shown arrival + bought never passes 50."""
+    return str(gallons.quantize(TENTH, rounding=ROUND_DOWN))
+
+
+def gap_leg_text(miles: Decimal) -> str:
+    """`gap_leg_miles` rounded up, so it never looks short enough to fit the range (AC-18)."""
+    return str(miles.quantize(TENTH, rounding=ROUND_CEILING))
+
+
+def money_text(amount: Decimal) -> str:
+    """Dollars as shown: 0.01, ROUND_HALF_UP (FR-30)."""
+    return str(amount.quantize(CENT, rounding=ROUND_HALF_UP))
+
+
+def gallons_text(gallons: Decimal) -> str:
+    """Echoed fuel inputs and fuel burned: 0.1, ROUND_HALF_UP ("50.0")."""
+    return str(gallons.quantize(TENTH, rounding=ROUND_HALF_UP))
+
+
+def snap_miles(snap_m: float) -> Decimal:
+    """OSRM's snap distance as shown: rounded once from the raw metres (FR-42)."""
+    return Decimal(repr(miles_from_meters(snap_m))).quantize(TENTH, rounding=ROUND_HALF_UP)
+
+
+def position(point: LonLat) -> list[float]:
+    """A GeoJSON position [lon, lat] at 5 dp; the only floats in the body (RFC 7946)."""
+    lon, lat = point
+    return [round(lon, POSITION_DECIMALS), round(lat, POSITION_DECIMALS)]
+
+
+def point_json(point: LonLat) -> dict[str, JsonValue]:
+    return {"type": "Point", "coordinates": position(point)}
+
+
+def endpoint_echo(
+    *, endpoint: EndpointInput, resolved: ResolvedEndpoint, point: LonLat
+) -> dict[str, JsonValue]:
+    """FR-7: the input as sent, the matched place (null for coordinates) and the 5-dp point."""
+    if isinstance(endpoint, CityInput):
+        sent: dict[str, JsonValue] = {"city": endpoint.city, "state": endpoint.state}
+    else:
+        sent = {"latitude": endpoint.latitude, "longitude": endpoint.longitude}
+    return {"input": sent, "matched": resolved.matched, "location": point_json(point)}
+
+
+@dataclass(frozen=True, slots=True)
+class PlanFacts:
+    """Everything the saved plan body is built from; all miles, gallons and money unrounded.
+
+    `snap_m` is None when start = finish, because then no route was fetched.
+    """
+
+    plan_id: str
+    start_echo: dict[str, JsonValue]
+    finish_echo: dict[str, JsonValue]
+    route_miles: Decimal
+    geometry: tuple[LonLat, ...]
+    snap_m: tuple[float, float] | None
+    plan: FuelPlan
+    stations: StationIndex
+    start_gallons: Decimal
+    reserve_gallons: Decimal
+    algorithm_version: str
+    is_same_point: bool
+
+
+def plan_body(facts: PlanFacts) -> dict[str, JsonValue]:
+    """The saved plan: the §7a body without `map_url` and `meta` (planobj, spec 02 §6)."""
+    plan = facts.plan
+    detour_method = _detour_method(plan)
+    return {
+        "plan_id": facts.plan_id,
+        "start": facts.start_echo,
+        "finish": facts.finish_echo,
+        "route": {
+            "distance_miles": miles_text(facts.route_miles),
+            "driven_distance_miles": miles_text(plan.driven_distance_miles),
+            "planning_margin_miles": miles_text(plan.planning_margin_miles),
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [position(point) for point in facts.geometry],
+            },
+        },
+        "fuel_stops": [
+            _stop_json(stop, sequence=sequence, stations=facts.stations)
+            for sequence, stop in enumerate(plan.stops, start=1)
+        ],
+        "finish_fuel_on_arrival_gallons": arrival_text(plan.finish_arrival_gallons),
+        "totals": {
+            "currency": "USD",
+            "gallons_bought": plan.gallons_bought,
+            "fuel_burned_gallons": gallons_text(plan.driven_distance_miles / MILES_PER_GALLON),
+            # The unrounded sum of the lines, rounded once (FR-30).
+            "total_purchase_cost": money_text(plan.total_cost),
+        },
+        "assumptions": _assumptions(facts, detour_method=detour_method),
+        "detours_verified": detour_method == "measured",
+        "notes": _notes(facts, detour_method=detour_method),
+        "warnings": _warnings(facts),
+    }
+
+
+def response_body(
+    *, saved: Mapping[str, JsonValue], map_url: str, meta: Mapping[str, JsonValue]
+) -> dict[str, JsonValue]:
+    """The §7a order: `plan_id`, `map_url`, the saved fields, then `meta` (built per response)."""
+    fields = {key: value for key, value in saved.items() if key != "plan_id"}
+    return {"plan_id": saved["plan_id"], "map_url": map_url, **fields, "meta": dict(meta)}
+
+
+def _stop_json(stop: PlannedStop, *, sequence: int, stations: StationIndex) -> dict[str, JsonValue]:
+    """FR-25: one stop; miles and arrival are driven values, the price is the CSV text."""
+    candidate = stop.candidate
+    record = stations.record(candidate.station_id)
+    return {
+        "sequence": sequence,
+        "station_id": str(record.station_id),
+        "name": record.name,
+        "address": record.address,
+        "city": record.city,
+        "state": record.state,
+        "location": point_json((record.longitude, record.latitude)),
+        "route_mile": miles_text(candidate.route_mile),
+        "estimated_detour_miles": miles_text(candidate.detour_miles),
+        "fuel_on_arrival_gallons": arrival_text(stop.arrival_gallons),
+        "purchase_rule": stop.purchase_rule,
+        "gallons_to_buy": stop.gallons_to_buy,
+        "price_per_gallon": record.price_text,
+        "line_cost": money_text(stop.line_cost),
+        "miles_to_next": miles_text(stop.driven_miles_to_next),
+        "location_quality": record.location_quality,
+        "detour_verified": candidate.is_detour_verified,
+    }
+
+
+def _detour_method(plan: FuelPlan) -> DetourMethod:
+    """FR-27: "measured" only if there are stops and every one was verified."""
+    flags = [stop.candidate.is_detour_verified for stop in plan.stops]
+    if flags and all(flags):
+        return "measured"
+    if any(flags):
+        return "mixed"
+    return "straight_line_estimate"
+
+
+def _assumptions(facts: PlanFacts, *, detour_method: DetourMethod) -> dict[str, JsonValue]:
+    """FR-31: every planning constant, so the numbers can be checked by hand."""
+    reserve = facts.reserve_gallons
+    first_leg = first_leg_range_miles(start_gallons=facts.start_gallons, reserve_gallons=reserve)
+    return {
+        "mpg": str(MILES_PER_GALLON),
+        "tank_gallons": str(TANK_GALLONS),
+        "planning_tank_gallons": str(PLANNING_TANK_GALLONS),
+        "reserve_gallons": gallons_text(reserve),
+        "start_fuel_gallons": gallons_text(facts.start_gallons),
+        "start_fuel_charged": False,
+        "effective_range_miles": {
+            "first_leg": miles_text(first_leg),
+            "after_purchase": miles_text(after_purchase_range_miles(reserve)),
+            "hard_max": miles_text(hard_max_range_miles(reserve)),
+        },
+        "max_detour_miles": MAX_DETOUR_TEXT,
+        "unverified_stop_margin_miles": miles_text(facts.plan.stop_margin_miles),
+        "detour_method": detour_method,
+        "price_rule": PRICE_RULE,
+        "price_source": PRICE_SOURCE,
+        "optimality": _optimality(facts.plan, detour_method=detour_method),
+        "dataset_version": facts.stations.dataset_version,
+        "algorithm_version": facts.algorithm_version,
+        "attribution": list(ATTRIBUTION),
+    }
+
+
+def _optimality(plan: FuelPlan, *, detour_method: DetourMethod) -> str:
+    """The optimality claim names the margin and detour kind actually used (FR-27)."""
+    detours = {
+        "straight_line_estimate": "straight-line detours",
+        "measured": "measured detours",
+        "mixed": "measured and straight-line detours",
+    }[detour_method]
+    model = ["49-gal planning tank"]
+    if plan.stop_margin_miles:
+        model.append(f"{plan.stop_margin_miles}-mi margin per stop end")
+    model += [detours, "candidates ≤ 5 mi"]
+    return (
+        f"lowest cost within the planning model ({', '.join(model)}) for exact amounts; "
+        "purchases rounded to whole gallons (at most 1 extra gallon per stop)"
+    )
+
+
+def _notes(facts: PlanFacts, *, detour_method: DetourMethod) -> list[JsonValue]:
+    """FR-26/29/30 notes in a fixed order; optional ones appear only when they apply."""
+    plan = facts.plan
+    notes: list[JsonValue] = []
+    if facts.is_same_point:
+        notes.append(SAME_POINT_NOTE)
+    elif not plan.stops:
+        notes.append(
+            f"No fuel stop is needed: the start tank ({gallons_text(facts.start_gallons)} gal) "
+            f"covers the {miles_text(facts.route_miles)}-mile trip with "
+            f"{arrival_text(plan.finish_arrival_gallons)} gal left."
+        )
+    if detour_method != "measured":
+        notes.append(DETOUR_NOTE)
+    if plan.planning_margin_miles:  # omitted at 0.0 (FR-27)
+        notes.append(
+            f"The plan keeps {miles_text(plan.planning_margin_miles)} extra miles of fuel as a "
+            "safety margin for unverified detours; these miles are not driven."
+        )
+    notes.append(
+        f"Start tank ({gallons_text(facts.start_gallons)} gal) is not charged; "
+        f"{arrival_text(plan.finish_arrival_gallons)} gal left at finish."
+    )
+    notes += [PRICE_NOTE, MONEY_NOTE, ARRIVAL_ROUNDING_NOTE, WHOLE_GALLON_NOTE]
+    if plan.has_merged_leg:
+        notes += [MERGED_STOP_NOTE, MERGED_LEG_NOTE]
+    return notes
+
+
+def _warnings(facts: PlanFacts) -> list[JsonValue]:
+    """FR-42 far snaps (start, then finish), then FR-28 approximate stops in stop order."""
+    warnings: list[JsonValue] = []
+    if facts.snap_m is not None:
+        for field_name, verb, meters in zip(
+            ("start", "finish"), ("starts", "ends"), facts.snap_m, strict=True
+        ):
+            shown = snap_miles(meters)
+            if shown > FAR_SNAP_MILES:
+                warnings.append(
+                    {
+                        "code": "far_snap",
+                        "message": (
+                            f"The {field_name} point is {shown} mi from the nearest road; the "
+                            f"route {verb} there, and those miles are not counted."
+                        ),
+                        "field": field_name,
+                        "snap_miles": str(shown),
+                    }
+                )
+    for stop in facts.plan.stops:
+        record = facts.stations.record(stop.candidate.station_id)
+        if record.location_quality == "approximate":
+            warnings.append(
+                {
+                    "code": "approximate_location",
+                    "message": (
+                        f"Station {record.station_id} ({record.name}, {record.city} "
+                        f"{record.state}) has only a town-level location; its real position "
+                        "and detour may differ."
+                    ),
+                    "station_id": str(record.station_id),
+                }
+            )
+    return warnings
+
+
+def no_feasible_plan_error(
+    *, gap: FuelGap, route_miles: Decimal, first_leg_miles: Decimal
+) -> NoFeasiblePlan:
+    """FR-23: the 422 with the gap's rounded fields and a message naming both ends of it.
+
+    The gap starts at the start when it is at mile 0 with the first-leg range, and ends at
+    the finish when it reaches mile L (a station exactly there reads the same).
+    """
+    gap_from, gap_to = miles_text(gap.gap_from_mile), miles_text(gap.gap_to_mile)
+    leg, max_leg = gap_leg_text(gap.gap_leg_miles), miles_text(gap.max_leg_miles)
+    if not gap.max_leg_miles:
+        message = NO_USABLE_FUEL_MESSAGE
+    else:
+        is_from_start = not gap.gap_from_mile and gap.max_leg_miles == first_leg_miles
+        origin = "the start" if is_from_start else f"the station at mile {gap_from}"
+        is_to_finish = gap.gap_to_mile == route_miles
+        target = f"the finish at mile {gap_to}" if is_to_finish else f"a station at mile {gap_to}"
+        message = (
+            f"Cannot plan this trip among the stations checked: from {origin} the next stop "
+            f"({target}) is {leg} planned miles away (including detours and the safety margin), "
+            f"but the truck can cover at most {max_leg} miles there."
+        )
+    return NoFeasiblePlan(
+        message=message,
+        gap_from_mile=gap_from,
+        gap_to_mile=gap_to,
+        gap_leg_miles=leg,
+        max_leg_miles=max_leg,
+        hint=str(gap.hint),
+    )

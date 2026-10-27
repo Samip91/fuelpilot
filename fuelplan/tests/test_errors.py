@@ -97,7 +97,9 @@ class ErrorEnvelopeHttpTests(ApiTestCase):
         assert_envelope(self, response, status=404, code="not_found")
 
         with (
-            mock.patch("fuelplan.views.plan_trip", side_effect=RuntimeError("secret /var/x")),
+            mock.patch(
+                "fuelplan.views.build_trip_planner", side_effect=RuntimeError("secret /var/x")
+            ),
             self.assertLogs("fuelplan.errors", "ERROR"),
             self.assertLogs("django.request", "ERROR"),
         ):
@@ -107,7 +109,9 @@ class ErrorEnvelopeHttpTests(ApiTestCase):
 
     def test_a_crash_in_the_view_is_a_logged_500_without_a_traceback(self) -> None:
         with (
-            mock.patch("fuelplan.views.plan_trip", side_effect=RuntimeError("secret /var/x")),
+            mock.patch(
+                "fuelplan.views.build_trip_planner", side_effect=RuntimeError("secret /var/x")
+            ),
             self.assertLogs("fuelplan.errors", "ERROR") as logs,
         ):
             response = self.post_raw(VALID_BODY.encode())
@@ -117,18 +121,23 @@ class ErrorEnvelopeHttpTests(ApiTestCase):
             self.assertNotIn(leaked, response.content)
         self.assertIn("RuntimeError", "\n".join(logs.output))
 
-    def test_until_2c_a_valid_request_ends_at_the_planner_seam_as_500(self) -> None:
-        with self.assertLogs("fuelplan.errors", "ERROR") as logs:
+    def test_without_imported_stations_a_valid_request_is_a_500_that_names_the_import(
+        self,
+    ) -> None:
+        # The real planner wiring with an empty Station table (FR-43); no call is possible.
+        with mock.patch("fuelplan.planner.build_routing_client") as routing:
             response = self.post_raw(VALID_BODY.encode())
 
-        assert_envelope(self, response, status=500, code="internal_error")
-        self.assertIn("TODO(2C)", "\n".join(logs.output))
+        details = assert_envelope(self, response, status=500, code="internal_error")
+        self.assertEqual(details, {})
+        self.assertIn("import_fuel_stations", json.loads(response.content)["error"]["message"])
+        routing.return_value.fetch_route.assert_not_called()
 
     def test_location_data_error_becomes_internal_error_without_detail(self) -> None:
         for error in (LocationDataError(SECRET_PATH), RouteGeometryError("need 2 points, got 1")):
             with self.subTest(error=type(error).__name__):
                 with (
-                    mock.patch("fuelplan.views.plan_trip", side_effect=error),
+                    mock.patch("fuelplan.views.build_trip_planner", side_effect=error),
                     self.assertLogs("fuelplan.errors", "ERROR") as logs,
                 ):
                     response = self.post_raw(VALID_BODY.encode())
@@ -184,6 +193,16 @@ class ErrorEnvelopeHttpTests(ApiTestCase):
                 self.assertIsInstance(details["retry_after_seconds"], int)
                 self.assertIs(details["retryable"], True)
                 self.assertEqual(last["Retry-After"], str(details["retry_after_seconds"]))
+
+    def test_gets_and_options_do_not_use_up_the_post_throttle(self) -> None:
+        cache.clear()
+        for _ in range(THROTTLE_LIMIT + 1):
+            self.assertEqual(self.client.get(PLAN_URL).status_code, 405)
+            self.assertEqual(self.client.options(PLAN_URL).status_code, 405)
+
+        response = self.client.generic("POST", PLAN_URL, b"{", content_type="application/json")
+
+        assert_envelope(self, response, status=400, code="invalid_request")
 
 
 class ErrorCatalogueTests(OfflineTestCase):

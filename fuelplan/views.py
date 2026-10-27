@@ -1,15 +1,17 @@
-"""The API edge: `POST /api/v1/fuel-plans` and the JSON 404 for other `/api/v1/` paths.
+"""The API edge: `POST /api/v1/fuel-plans`, the map stub and the JSON 404 for other paths.
 
-The view only checks and parses the request, then hands a validated `PlanRequest`
-and a fresh `CallBudget` to the planner. Every error it raises becomes the §7a
-envelope through `errors.api_exception_handler`.
+The view only checks and parses the request, hands a validated `PlanRequest` and a
+fresh `CallBudget` to the planner, and adds the per-response `map_url` and `meta`.
+Every error it raises becomes the §7a envelope through `errors.api_exception_handler`.
 """
 
 import json
 from collections.abc import Mapping
 from typing import BinaryIO
+from uuid import UUID
 
 from django.http import HttpRequest, JsonResponse
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.exceptions import ParseError
 from rest_framework.negotiation import DefaultContentNegotiation
@@ -17,13 +19,14 @@ from rest_framework.parsers import JSONParser
 from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle, BaseThrottle
 from rest_framework.views import APIView
 
-from .errors import BODY_KEY, InvalidRequest, not_found_response
+from .errors import BODY_KEY, InvalidRequest, error_response, not_found_response
 from .parsing import whole_number
+from .planner import build_trip_planner
 from .routing import CALL_LIMIT, CallBudget
-from .serializers import PlanRequest, parse_plan_request
+from .serializers import parse_plan_request, response_body
 
 MAX_BODY_BYTES = 10_240  # NFR-10, checked before the body is read
 # Django and DRF read Content-Length with int(), which fails beyond 4,300 digits (even
@@ -97,14 +100,6 @@ def require_small_body(meta: Mapping[str, object]) -> None:
     raise InvalidRequest({BODY_KEY: [reason]})
 
 
-def plan_trip(*, plan_request: PlanRequest, budget: CallBudget) -> Response:
-    """TODO(2C): replace with the planner (resolve → caches → route → optimise → body).
-
-    Until build step 2C lands, a valid request ends here as a logged 500.
-    """
-    raise NotImplementedError("TODO(2C): the planner is not built yet")
-
-
 class FuelPlanView(APIView):
     """`POST /api/v1/fuel-plans`: size check → JSON parse → strict schema → planner."""
 
@@ -114,10 +109,47 @@ class FuelPlanView(APIView):
     content_negotiation_class = JsonOnlyNegotiation
     throttle_classes = [AnonRateThrottle]  # this view only: other pages never use its bucket
 
+    def get_throttles(self) -> list[BaseThrottle]:
+        """Only POSTs count: a GET or OPTIONS (a 405) must not use up the 30/min bucket."""
+        if self.request.method != "POST":
+            return []
+        return super().get_throttles()
+
     def post(self, request: Request) -> Response:
         require_small_body(request.META)
         plan_request = parse_plan_request(request.data)
-        return plan_trip(plan_request=plan_request, budget=CallBudget(CALL_LIMIT))
+        outcome = build_trip_planner().plan(
+            plan_request=plan_request, budget=CallBudget(CALL_LIMIT)
+        )
+        # Built per response from this request's Host (checked by ALLOWED_HOSTS), never saved.
+        map_url = request.build_absolute_uri(
+            reverse("fuelplan:fuel-plan-map", kwargs={"plan_id": outcome.plan_id})
+        )
+        return Response(
+            response_body(saved=outcome.body, map_url=map_url, meta=outcome.meta.as_json())
+        )
+
+
+MAP_METHODS = ["GET", "HEAD"]
+
+
+@csrf_exempt  # a POST here must get the JSON 405, not a CSRF 403
+def fuel_plan_map(request: HttpRequest, plan_id: UUID) -> JsonResponse:
+    """Stub of the map page (FR-33): spec 02 replaces this view, not the route."""
+    if request.method not in MAP_METHODS:
+        return error_response(
+            code="method_not_allowed",
+            message=f"Use {' or '.join(MAP_METHODS)} for this endpoint.",
+            details={"allowed": list(MAP_METHODS)},
+            status=405,
+            headers={"Allow": ", ".join(MAP_METHODS)},
+        )
+    return error_response(
+        code="plan_not_found",
+        message="No saved plan with this id; it may have expired. Send the trip again.",
+        details={"plan_id": str(plan_id)},
+        status=404,
+    )
 
 
 @csrf_exempt  # any method may arrive here; it must get the JSON 404, not a CSRF 403
