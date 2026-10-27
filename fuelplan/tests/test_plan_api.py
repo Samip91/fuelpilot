@@ -443,7 +443,7 @@ class ShortTripTests(PlanApiTestCase):
 
 
 class MapUrlTests(PlanApiTestCase):
-    """TC-28 (FR-33): `map_url` is absolute, per request, and resolves to the map stub."""
+    """TC-28 (FR-33, spec 01 Q-4 d): `map_url` is absolute, per request, and opens the map."""
 
     def _plan_id_and_map_url(self, **extra: str) -> tuple[str, str]:
         body = self.assert_ok(
@@ -462,12 +462,23 @@ class MapUrlTests(PlanApiTestCase):
 
         self.assertTrue(map_url.startswith("http://localhost/api/v1/fuel-plans/"))
 
-    def test_the_map_stub_answers_get_and_head_with_plan_not_found(self) -> None:
-        plan_id, map_url = self._plan_id_and_map_url()
+    def test_the_map_url_of_a_saved_plan_opens_the_map_page_for_get_and_head(self) -> None:
+        _, map_url = self._plan_id_and_map_url()
 
-        details = assert_envelope(self, self.client.get(map_url), status=404, code="plan_not_found")
-        self.assertEqual(details, {"plan_id": plan_id})
-        self.assertEqual(self.client.head(map_url).status_code, 404)
+        page, head = self.client.get(map_url), self.client.head(map_url)
+
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page["Content-Type"], "text/html; charset=utf-8")
+        self.assertTrue(page.content.startswith(b"<!doctype html>"))
+        self.assertEqual(head.status_code, 200)
+
+    def test_a_map_url_with_an_unknown_plan_id_is_plan_not_found(self) -> None:
+        unknown_id = "00000000-0000-4000-8000-000000000000"
+
+        response = self.client.get(f"/api/v1/fuel-plans/{unknown_id}/map")
+
+        details = assert_envelope(self, response, status=404, code="plan_not_found")
+        self.assertEqual(details, {"plan_id": unknown_id})
 
     def test_other_methods_on_the_map_route_are_405_with_allow(self) -> None:
         _, map_url = self._plan_id_and_map_url()
