@@ -1,0 +1,12 @@
+5128581	New York	New York	NYC,Big Apple,Нью-Йорк	40.71427	-74.00597	P	PPL	US		NY				8804190		100	America/Chicago	2024-01-01
+4407066	St. Louis	St. Louis	Saint Louis,St Louis	38.62727	-90.19789	P	PPLA2	US		MO				301578		100	America/Chicago	2024-01-01
+5392171	San José	San Jose		37.33939	-121.89496	P	PPLA2	US		CA				1013240		100	America/Chicago	2024-01-01
+9000001	Springfield	Springfield		39.70000	-89.60000	P	PPL	US		IL				1000		100	America/Chicago	2024-01-01
+4250542	Springfield	Springfield		39.80172	-89.64371	P	PPLA	US		IL				5000		100	America/Chicago	2024-01-01
+4509177	Columbus	Columbus		39.96118	-82.99879	P	PPLA	US		OH				905748		100	America/Chicago	2024-01-01
+9000002	Nowhereville	Nowhereville		38.50000	-98.00000	T	MT	US		KS				0		100	America/Chicago	2024-01-01
+4259418	Greenwood	Greenwood	Greenfield	39.61366	-86.10665	P	PPL	US		IN				63830		100	America/Chicago	2024-01-01
+4919987	Greenfield	Greenfield		39.78504	-85.76942	P	PPLA2	US		IN				23488		100	America/Chicago	2024-01-01
+9000004	Oakdale	Oakdale		45.00000	-92.90000	P	PPLX	US		MN				0		100	America/Chicago	2024-01-01
+9000005	Oakdale	Oakdale		44.96302	-92.96494	P	PPL	US		MN				0		100	America/Chicago	2024-01-01
+9000003	Anchorage	Anchorage		61.21806	-149.90028	P	PPLA2	US		AK				291247		100	America/Chicago	2024-01-01
