@@ -10,6 +10,7 @@ from unittest import skipUnless
 
 import django
 from django.conf import settings
+from django.db import connection
 
 from .base import NetworkAccessBlocked, OfflineTestCase
 
@@ -158,6 +159,14 @@ class SecureDefaultsTests(OfflineTestCase):
         )
 
         self.assertEqual(result.returncode, 0)
+
+
+class DatabaseSettingsTests(OfflineTestCase):
+    def test_sqlite_writers_take_the_lock_up_front_and_wait_at_most_2_s(self) -> None:
+        options = settings.DATABASES["default"]["OPTIONS"]
+
+        self.assertEqual(options, {"timeout": 2, "transaction_mode": "IMMEDIATE"})
+        self.assertEqual(connection.transaction_mode, "IMMEDIATE")
 
 
 class RoutingSettingsTests(OfflineTestCase):

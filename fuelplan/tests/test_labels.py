@@ -87,6 +87,15 @@ class LocationLabelTests(OfflineTestCase):
             with self.subTest(point=point):
                 self.assertIsNone(_label(_raw(point)))
 
+    def test_a_point_just_inside_the_northern_box_edge_is_kept_and_just_outside_refused(
+        self,
+    ) -> None:
+        # The box top is 49.5° N; confidence X keeps the label without a nearby town.
+        inside, outside = ("49.40000", "-95.00000"), ("49.60000", "-95.00000")
+
+        self.assertEqual(_label(_raw(inside, confidence=str(X)), city_place=None), POI)
+        self.assertIsNone(_label(_raw(outside, confidence=str(X)), city_place=None))
+
     def test_a_state_code_that_differs_from_the_csv_state_is_unresolved(self) -> None:
         for state_code in ("MO", "", "ILL"):
             with self.subTest(state_code=state_code):

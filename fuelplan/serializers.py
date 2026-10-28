@@ -19,11 +19,14 @@ from typing import Literal
 from rest_framework import serializers
 
 from .errors import BODY_KEY, InvalidRequest, JsonValue, NoFeasiblePlan
-from .geo import LonLat, miles_from_meters
+from .geo import MAX_DETOUR_MILES, LonLat, miles_from_meters
 from .locations import ResolvedEndpoint, normalise_state
+from .map_page import MIN_STOPS_FOR_ROUNDING_NOTE, MONEY_NOTE
 from .optimizer import (
+    MAX_RESERVE_GALLONS,
     MILES_PER_GALLON,
     PLANNING_TANK_GALLONS,
+    TANK_GALLONS,
     FuelGap,
     FuelPlan,
     PlannedStop,
@@ -37,8 +40,6 @@ from .stations import StationIndex
 CITY_MAX_CHARS = 100  # NFR-10
 STATE_MAX_CHARS = 10  # anything longer is not a code; "Illinois" still gets the code hint
 FUEL_STEP = Decimal("0.1")
-TANK_GALLONS = Decimal("50")
-MAX_RESERVE_GALLONS = Decimal("48")  # Q-5: below the 49-gal planning tank
 DEFAULT_CURRENT_GALLONS = Decimal("50.0")
 DEFAULT_RESERVE_GALLONS = Decimal("5.0")
 FUEL_STRING_MAX_CHARS = 16
@@ -235,11 +236,18 @@ class EndpointSerializer(RejectUnknownKeysMixin, serializers.Serializer):
 
     def validate_state(self, value: str) -> str:
         """Only real codes pass; AK, HI or ON pass here and are refused later as 422 (FR-3/4)."""
-        if normalise_state(value) not in KNOWN_REGION_CODES:
+        code = normalise_state(value)
+        if code in KNOWN_REGION_CODES:
+            return value
+        # "XX" has the right shape but is no state; "Illinois" or "ILL" has the wrong shape.
+        is_code_shaped = len(code) == 2 and code.isascii() and code.isalpha()
+        if is_code_shaped:
             raise serializers.ValidationError(
-                f"{value} is not a US state code; use a 2-letter USPS code such as IL."
+                f'"{value}" is not a US state code; use a 2-letter USPS code, e.g. IL.'
             )
-        return value
+        raise serializers.ValidationError(
+            f'"{value}" is not a 2-letter state code; use the USPS code, e.g. IL.'
+        )
 
     def validate(self, attrs: dict[str, object]) -> EndpointInput:
         city_keys = [key for key in CITY_FORM if key in attrs]
@@ -285,10 +293,13 @@ class PlanRequestSerializer(RejectUnknownKeysMixin, serializers.Serializer):
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
         current, reserve = attrs["current_fuel_gallons"], attrs["reserve_gallons"]
         if current < reserve:
+            # Name the default when it was not sent, or the caller sees a value they never set.
+            is_reserve_sent = "reserve_gallons" in self.initial_data
+            reserve_label = f"({reserve})" if is_reserve_sent else f"(default {reserve})"
             raise serializers.ValidationError(
                 {
                     "reserve_gallons": [
-                        f"reserve_gallons ({reserve}) must not be more than "
+                        f"reserve_gallons {reserve_label} must not be more than "
                         f"current_fuel_gallons ({current})."
                     ]
                 }
@@ -322,7 +333,6 @@ TENTH = Decimal("0.1")
 CENT = Decimal("0.01")
 POSITION_DECIMALS = 5  # GeoJSON positions: JSON numbers at 5 dp, [lon, lat]
 FAR_SNAP_MILES = Decimal("1.0")  # FR-42: warn only when the shown value is above this
-MAX_DETOUR_TEXT = "5.0"
 
 PRICE_RULE = "lowest listed CSV price per station among rows with a resolved location"
 PRICE_SOURCE = "provided CSV snapshot, not live"
@@ -338,10 +348,6 @@ DETOUR_NOTE = (
     "can be slightly longer than planned; keep a reserve."
 )
 PRICE_NOTE = "Prices are the provided CSV snapshot, not live."
-MONEY_NOTE = (
-    "Each line cost is rounded to the cent and the total is rounded once, "
-    "so they can differ by a few cents."
-)
 ARRIVAL_ROUNDING_NOTE = (
     "Fuel on arrival is rounded down and fuel burned to the nearest 0.1, so start + bought "
     "− burned can differ from the finish figure by 0.1 gal."
@@ -501,17 +507,18 @@ def response_body(
 
 # --- The human-readable summary (spec 01 amendment 2026-10-28, response readability) ------
 
-REASON_TEXT = {
-    "fill_tank": "fill up: the next stations ahead cost more",
-    "to_next_stop": "just enough to reach the next, cheaper stop",
-    "to_finish": "enough to reach the finish",
-}
+# Per-stop reasons. A price claim is made only when the next kept stop's price shows it:
+# after the whole-gallon replay merges a stop, the stop that really follows is not always
+# the one the optimiser compared against, so otherwise the neutral wording is used.
+FILL_DEARER_NEXT_TEXT = "fill up: the next stop costs more"
+FILL_TEXT = "fill up"
+JUST_ENOUGH_CHEAPER_NEXT_TEXT = "just enough to reach the next stop at the same or a lower price"
+JUST_ENOUGH_TEXT = "just enough to reach the next stop"
+TO_FINISH_TEXT = "enough to reach the finish"
+KNOWN_PURCHASE_RULES = frozenset({"fill_tank", "to_next_stop", "to_finish"})
 APPROXIMATE_STOP_TEXT = " Town-level location: check the exact exit before you go."
-# Only with 2+ stops: then the shown line costs can add up to a cent or two off the total.
-ROUNDING_TEXT = (
-    " Each stop's cost is rounded to the cent and the total is rounded once, "
-    "so they can differ by a cent or two."
-)
+# Only with 2+ stops: with one stop its line cost is the total, so nothing can differ.
+ROUNDING_TEXT = f" {MONEY_NOTE}"
 
 
 class UnknownPurchaseRule(Exception):
@@ -527,7 +534,7 @@ def summary_block(body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     start, finish = _place_label(body["start"]), _place_label(body["finish"])
     return {
         "headline": _headline(body, start=start, finish=finish),
-        "stops": [_stop_line(stop) for stop in body["fuel_stops"]],
+        "stops": _stop_lines(body["fuel_stops"]),
         "finish": (
             f"Arrive in {finish} with {body['finish_fuel_on_arrival_gallons']} gal left. "
             f"The start tank ({body['assumptions']['start_fuel_gallons']} gal) is not charged."
@@ -553,22 +560,48 @@ def _headline(body: Mapping[str, JsonValue], *, start: str, finish: str) -> str:
             f"(${totals['total_purchase_cost']})."
         )
     stops_text = "1 fuel stop" if stop_count == 1 else f"{stop_count} fuel stops"
-    rounding_text = ROUNDING_TEXT if stop_count >= 2 else ""
+    rounding_text = ROUNDING_TEXT if stop_count >= MIN_STOPS_FOR_ROUNDING_NOTE else ""
     return (
         f"{trip}, {stops_text}, total fuel cost ${totals['total_purchase_cost']} "
         f"for {totals['gallons_bought']} gal.{rounding_text}"
     )
 
 
-def _stop_line(stop: Mapping[str, JsonValue]) -> str:
+def _stop_lines(stops: list[Mapping[str, JsonValue]]) -> list[str]:
+    """One line per stop; each reason looks at the stop that really comes next (or none)."""
+    last = len(stops) - 1
+    return [
+        _stop_line(stop, next_stop=stops[index + 1] if index < last else None)
+        for index, stop in enumerate(stops)
+    ]
+
+
+def _reason_text(
+    stop: Mapping[str, JsonValue], *, next_stop: Mapping[str, JsonValue] | None
+) -> str:
+    """Why this stop buys what it buys, claiming only what the next kept stop's price shows."""
     rule = stop["purchase_rule"]
-    if rule not in REASON_TEXT:
+    if rule not in KNOWN_PURCHASE_RULES:
         raise UnknownPurchaseRule(f"no summary text for purchase_rule {rule!r}")
+    if rule == "to_finish":
+        return TO_FINISH_TEXT
+    # Both prices are the CSV text as stored, so comparing them adds no rounding.
+    next_price = None if next_stop is None else Decimal(next_stop["price_per_gallon"])
+    price = Decimal(stop["price_per_gallon"])
+    if rule == "fill_tank":
+        is_next_dearer = next_price is not None and next_price > price
+        return FILL_DEARER_NEXT_TEXT if is_next_dearer else FILL_TEXT
+    is_next_cheaper_or_equal = next_price is not None and next_price <= price
+    return JUST_ENOUGH_CHEAPER_NEXT_TEXT if is_next_cheaper_or_equal else JUST_ENOUGH_TEXT
+
+
+def _stop_line(stop: Mapping[str, JsonValue], *, next_stop: Mapping[str, JsonValue] | None) -> str:
+    reason = _reason_text(stop, next_stop=next_stop)
     line = (
         f"{stop['sequence']}. Mile {stop['route_mile']} — {stop['name']}, {stop['city']}, "
         f"{stop['state']} ({stop['address']}): arrive with {stop['fuel_on_arrival_gallons']} "
         f"gal, buy {stop['gallons_to_buy']} gal × ${stop['price_per_gallon']} = "
-        f"${stop['line_cost']} — {REASON_TEXT[rule]}."
+        f"${stop['line_cost']} — {reason}."
     )
     if stop["location_quality"] == "approximate":
         line += APPROXIMATE_STOP_TEXT
@@ -626,7 +659,7 @@ def _assumptions(facts: PlanFacts, *, detour_method: DetourMethod) -> dict[str, 
             "after_purchase": miles_text(after_purchase_range_miles(reserve)),
             "hard_max": miles_text(hard_max_range_miles(reserve)),
         },
-        "max_detour_miles": MAX_DETOUR_TEXT,
+        "max_detour_miles": miles_text(MAX_DETOUR_MILES),
         "unverified_stop_margin_miles": miles_text(facts.plan.stop_margin_miles),
         "detour_method": detour_method,
         "price_rule": PRICE_RULE,
@@ -667,7 +700,9 @@ def _notes(facts: PlanFacts, *, detour_method: DetourMethod) -> list[JsonValue]:
             f"covers the {miles_text(facts.route_miles)}-mile trip with "
             f"{arrival_text(plan.finish_arrival_gallons)} gal left."
         )
-    if detour_method != "measured":
+    # The detour and whole-gallon notes explain stops; the money note needs 2+ line costs.
+    has_stops = bool(plan.stops)
+    if has_stops and detour_method != "measured":
         notes.append(DETOUR_NOTE)
     if plan.planning_margin_miles:  # omitted at 0.0 (FR-27)
         notes.append(
@@ -678,7 +713,12 @@ def _notes(facts: PlanFacts, *, detour_method: DetourMethod) -> list[JsonValue]:
         f"Start tank ({gallons_text(facts.start_gallons)} gal) is not charged; "
         f"{arrival_text(plan.finish_arrival_gallons)} gal left at finish."
     )
-    notes += [PRICE_NOTE, MONEY_NOTE, ARRIVAL_ROUNDING_NOTE, WHOLE_GALLON_NOTE]
+    notes.append(PRICE_NOTE)
+    if len(plan.stops) >= MIN_STOPS_FOR_ROUNDING_NOTE:
+        notes.append(MONEY_NOTE)
+    notes.append(ARRIVAL_ROUNDING_NOTE)
+    if has_stops:
+        notes.append(WHOLE_GALLON_NOTE)
     if plan.has_merged_leg:
         notes += [MERGED_STOP_NOTE, MERGED_LEG_NOTE]
     return notes

@@ -175,6 +175,7 @@ class CallCountPerPathTests(PlanCacheTestCase):
         self.assertEqual(repeat["plan_id"], first["plan_id"])
         self.assertEqual(repeat["meta"], meta(0, "skipped", "hit"))
         self.assertEqual(self.calls, 0)
+        self.assertEqual(route_keys(), set())  # no route was fetched, so none is saved
 
     def test_endpoints_that_differ_only_past_5_dp_reuse_the_route(self) -> None:
         self.plan_ok(meridian_request(300.0), reply=meridian_reply(300.0))

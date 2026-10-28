@@ -668,6 +668,18 @@ class ReplayHandCaseTests(OptimizerCase):
         self.assertEqual(plan.total_cost, D("126.000"))
         self.assertTrue(plan.has_merged_leg)
 
+    def test_a_fill_whose_next_stop_merges_away_reaches_the_finish_on_its_own(self) -> None:
+        # The just-enough stop at B rounds to 0 gal and merges: A's fill reaches the finish.
+        stations = [station(1, "100", "3.000"), station(2, "300", "3.500")]
+
+        plan = self.assert_plan(self.solve("549.0", stations))
+
+        self.assert_stops(plan, [(1, "40.0", "fill_tank", 10, "50.0")])
+        self.assertEqual(plan.finish_arrival_gallons, D("5.1"))
+        self.assertEqual(plan.gallons_bought, 10)
+        self.assertEqual(plan.total_cost, D("30.000"))
+        self.assertTrue(plan.has_merged_leg)
+
     def test_shown_arrival_plus_purchase_never_exceeds_the_tank(self) -> None:
         stations = [station(1, "400", "3.000"), station(2, "798", "3.100")]
 

@@ -45,12 +45,18 @@ LEAFLET_JS_SRI = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
 TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_COPYRIGHT = "https://www.openstreetmap.org/copyright"
 GEOAPIFY = "https://www.geoapify.com/"
+OSM_FIX_THE_MAP = "https://www.openstreetmap.org/fixthemap"
+OSM_CREDIT_LINE = "© OpenStreetMap contributors · Fix the map"
+ROUNDING_LINE = (
+    "(Each line cost is rounded to the cent and the total is rounded once, "
+    "so they can differ by a few cents.)"
+)
 
 # §7b for the golden plan, with the 2026-10-28 amendments (burns, purchase rule, range).
 GOLDEN_HEADER = [
     "Chicago, IL → Denver, CO",
     "Total fuel cost $183.04 · 56 gal bought · 2 fuel stops",
-    "(each stop cost is rounded to the cent; the total is rounded once)",
+    ROUNDING_LINE,
     "Route 1003.2 mi · driven 1005.2 mi incl. detours · finish with 5.4 gal · burns 100.5 gal",
     "Start tank (50.0 gal) is not charged · reserve 5.0 gal. Prices: provided CSV snapshot, "
     "not live.",
@@ -446,7 +452,11 @@ class BadInputTests(SeededMapTestCase):
     def test_with_debug_on_a_database_error_is_still_the_json_500_not_a_traceback_page(
         self,
     ) -> None:
-        with mock.patch.object(caches["default"], "get", side_effect=DatabaseError("locked")):
+        # Django logs the 500 on django.request; capturing it keeps the test output clean.
+        with (
+            mock.patch.object(caches["default"], "get", side_effect=DatabaseError("locked")),
+            self.assertLogs("django.request", "ERROR"),
+        ):
             self._assert_internal_error()
 
 
@@ -500,7 +510,7 @@ class AssetTests(SeededMapTestCase):
         ]
         anchors = {attrs["href"] for tag, attrs in page.elements if tag == "a"}
         self.assertEqual(sorted(assets), [LEAFLET_CSS, LEAFLET_JS])
-        self.assertEqual(anchors, {OSM_COPYRIGHT, GEOAPIFY})
+        self.assertEqual(anchors, {OSM_COPYRIGHT, OSM_FIX_THE_MAP, GEOAPIFY})
 
     def test_the_script_loads_only_osm_https_tiles_up_to_zoom_19_and_never_prefetches(
         self,
@@ -817,6 +827,7 @@ class ZeroStopTests(SeededMapTestCase):
 
         self.assertEqual(page.count(ZERO_STOP), 1)
         self.assertIn("Total fuel cost $0.00 · 0 gal bought · 0 fuel stops", page.lines)
+        self.assertNotIn(ROUNDING_LINE, page.lines)
         self.assertEqual(notice_lines(page), [])
         self.assertEqual(page.row_labels(), ["S", "F"])
         self.assertFalse([line for line in page.lines if line.startswith("Mile ")])
@@ -828,6 +839,18 @@ class ZeroStopTests(SeededMapTestCase):
 
         self.assertNotIn(ZERO_STOP, page.lines)
 
+    def test_the_rounding_line_shows_only_with_two_or_more_stops(self) -> None:
+        one_stop = planobj()
+        one_stop["fuel_stops"] = one_stop["fuel_stops"][:1]
+
+        self.assertEqual(self.page_of(planobj()).count(ROUNDING_LINE), 1)
+        self.assertEqual(self.page_of(one_stop).count(ROUNDING_LINE), 0)
+        self.assertEqual(self.page_of(zero_stop_plan()).count(ROUNDING_LINE), 0)
+
+    def test_the_rounding_line_has_the_same_wording_as_the_money_note(self) -> None:
+        self.assertEqual(map_page.ROUNDING_LINE, f"({map_page.MONEY_NOTE})")
+        self.assertIn(map_page.MONEY_NOTE, GOLDEN_BODY["notes"])
+
 
 class AttributionTests(SeededMapTestCase):
     """TC-18 (FR-13): OSM, Geoapify and the stored sources are credited."""
@@ -837,10 +860,11 @@ class AttributionTests(SeededMapTestCase):
         response = self.client.get(map_path())
         page = parse_page(response.content)
 
-        self.assertIn("© OpenStreetMap contributors", page.lines)
+        self.assertIn(OSM_CREDIT_LINE, page.lines)
         self.assertIn(
             b'\xc2\xa9 <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
-            b"contributors",
+            b"contributors \xc2\xb7 "
+            b'<a href="https://www.openstreetmap.org/fixthemap">Fix the map</a>',
             response.content,
         )
         self.assertIn(
@@ -850,6 +874,15 @@ class AttributionTests(SeededMapTestCase):
             self.assertEqual(page.count(item), 1)
         self.assertIn("Station data version: sha256:ab12…", page.lines)
         self.assertIn(OSM_COPYRIGHT, page.inline_script)  # the tile layer's own credit
+
+    def test_the_osm_credit_has_a_fix_the_map_link_beside_it(self) -> None:
+        page = self.page_of(planobj())
+
+        fix_links = [
+            attrs for tag, attrs in page.elements if tag == "a" and "fixthemap" in attrs["href"]
+        ]
+        self.assertEqual(fix_links, [{"href": OSM_FIX_THE_MAP}])
+        self.assertEqual(page.count(OSM_CREDIT_LINE), 1)
 
 
 class NoJavaScriptTests(SeededMapTestCase):
@@ -865,7 +898,7 @@ class NoJavaScriptTests(SeededMapTestCase):
         self.assertFalse(page.scripts)
         expected = [*GOLDEN_HEADER, *GOLDEN_ROWS, LEGEND, RANGE_LINE, DETOURS_NOTICE]
         expected += [*GOLDEN_BODY["notes"], *GOLDEN_BODY["assumptions"]["attribution"]]
-        expected += ["© OpenStreetMap contributors", "Powered by Geoapify"]
+        expected += [OSM_CREDIT_LINE, "Powered by Geoapify"]
         for line in expected:
             with self.subTest(line=line):
                 self.assertIn(line, page.lines)
