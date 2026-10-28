@@ -5,8 +5,6 @@ coordinates). FuelPilot returns the road route as a map, the cheapest fuel stops
 vehicle with a 500-mile range, and the total fuel cost at 10 miles per gallon. Every stop
 and every price comes from the provided fuel-price CSV.
 
-Loom walkthrough: https://www.loom.com/share/7857141b4e8d42e8a8f2fa627195fe6f
-
 ## Quick start
 
 You need **Python 3.12–3.14** (it installs Django 6.1.2, DRF 3.18.3 and python-dotenv
