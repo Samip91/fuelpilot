@@ -121,10 +121,14 @@ def _record(row: tuple[object, ...]) -> StationRecord:
     )
 
 
-# A failed load raises and is not kept, so FR-43 answers every request until the import runs.
+# A failed load raises and is not kept: FR-43 answers until the import runs, then the next
+# request loads the index. A loaded index is kept, so a re-import needs a server restart.
 _station_index = LazyValue(StationIndex.from_database)
 
 
 def get_station_index() -> StationIndex:
-    """The process-wide index, loaded on first use; restart the server after a re-import."""
+    """The process-wide index; once loaded, restart the server after a re-import.
+
+    Loaded at server start by `planner.warm_up`, else on first use.
+    """
     return _station_index.get()

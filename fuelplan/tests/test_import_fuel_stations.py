@@ -213,7 +213,11 @@ class DirtyCsvImportTests(ImportTestCase):
             "--resume (owner only, needs the Geoapify key), then import again.",
             stdout,
         )
-        self.assertTrue(stdout.rstrip().endswith("so it loads this dataset."))
+        self.assertTrue(
+            stdout.rstrip().endswith(
+                "If the server is already serving plans, restart it so it loads this dataset."
+            )
+        )
         self.assertEqual(stderr, "")
 
 
