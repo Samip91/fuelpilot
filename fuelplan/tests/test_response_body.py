@@ -1,12 +1,15 @@
 """Spec 01 TC-20, 21, 22, 23, 25 and 45: the 200 body, its money and its station data.
 
-TC-45 compares the whole body with the §7a example. TC-20/21/22 run the recorded NY→LA
+TC-45 compares the whole body with the §7a example, including the `summary` and the key
+order of the 2026-10-28 readability amendment. TC-20/21/22 run the recorded NY→LA
 route against stations imported by `import_fuel_stations` from real rows of the provided
 CSV, placed along that route; TC-21 then re-derives each stop's price from the raw CSV.
 """
 
+import copy
 import csv
 import json
+import re
 import shutil
 import tempfile
 from decimal import ROUND_HALF_UP, Decimal
@@ -21,16 +24,18 @@ from fuelplan.geocoding import LOCATION_FILE_COLUMNS
 from fuelplan.optimizer import Candidate, FuelPlan, plan_fuel_stops
 from fuelplan.regions import LOWER_48_AND_DC
 from fuelplan.serializers import (
+    UnknownPurchaseRule,
     arrival_text,
     gallons_text,
     gap_leg_text,
     miles_text,
     money_text,
     snap_miles,
+    summary_block,
 )
 from fuelplan.stations import StationIndex
 
-from .base import ApiTestCase
+from .base import ApiTestCase, OfflineTestCase
 from .planner_harness import (
     FIXTURES,
     TEST_PLACES,
@@ -45,10 +50,27 @@ from .planner_harness import (
 )
 
 RAW_CSV = Path(__file__).resolve().parents[2] / "data" / "raw" / "fuel-prices.csv"
+RESPONSE_KEY_ORDER = [
+    "plan_id",
+    "map_url",
+    "summary",
+    "start",
+    "finish",
+    "fuel_stops",
+    "finish_fuel_on_arrival_gallons",
+    "totals",
+    "assumptions",
+    "detours_verified",
+    "notes",
+    "warnings",
+    "meta",
+    "route",
+]
 CENT = Decimal("0.01")
 TENTH = Decimal("0.1")
 
-# The §7a success example, verbatim (spec 01, amended 2026-10-28: 7 notes, `matched`).
+# The §7a success example, verbatim (spec 01, amended 2026-10-28: 7 notes, `matched`,
+# then `summary` after `map_url` and `route` last).
 GOLDEN_BODY = json.loads((FIXTURES / "golden_chicago_denver.json").read_text(encoding="utf-8"))
 GOLDEN_REQUEST = {
     "start": {"city": "Chicago", "state": "IL"},
@@ -140,6 +162,26 @@ class GoldenBodyTests(ApiTestCase):
         self.assertEqual(body["assumptions"]["dataset_version"], self.harness.index.dataset_version)
         self.assertEqual(self.harness.transport.count, 1)
 
+    def test_the_response_keys_come_in_the_amended_order_with_route_last(self) -> None:
+        self.harness.queue_fixture("chicago_denver")
+
+        body = json_body(self.post_json(GOLDEN_REQUEST))
+
+        self.assertEqual(list(body), RESPONSE_KEY_ORDER)
+        self.assertEqual(list(GOLDEN_BODY), RESPONSE_KEY_ORDER)
+
+    def test_every_number_in_the_summary_is_already_a_value_in_the_body(self) -> None:
+        self.harness.queue_fixture("chicago_denver")
+
+        body = json_body(self.post_json(GOLDEN_REQUEST))
+
+        rest = {key: value for key, value in body.items() if key != "summary"}
+        summary_numbers = set(NUMBER.findall(json.dumps(body["summary"], ensure_ascii=False)))
+        body_numbers = set(NUMBER.findall(json.dumps(rest, ensure_ascii=False)))
+        self.assertEqual(summary_numbers - body_numbers, set())
+        self.assertIn(f"${body['totals']['total_purchase_cost']} ", body["summary"]["headline"])
+        self.assertNotIn("183.05", json.dumps(body["summary"]))  # the sum of the shown lines
+
     def test_the_total_is_rounded_once_not_summed_from_the_shown_lines(self) -> None:
         self.harness.queue_fixture("chicago_denver")
 
@@ -148,6 +190,130 @@ class GoldenBodyTests(ApiTestCase):
         shown_lines = sum(Decimal(stop["line_cost"]) for stop in body["fuel_stops"])
         self.assertEqual(shown_lines, Decimal("183.05"))
         self.assertEqual(body["totals"]["total_purchase_cost"], "183.04")
+
+
+NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def golden_with(**changes: object) -> dict:
+    """A deep copy of the golden body with some top-level fields replaced."""
+    body = copy.deepcopy(GOLDEN_BODY)
+    body.update(copy.deepcopy(changes))
+    return body
+
+
+def golden_stop(index: int, **changes: object) -> dict:
+    """A copy of golden stop `index` (0-based) with some fields replaced."""
+    return {**copy.deepcopy(GOLDEN_BODY["fuel_stops"][index]), **changes}
+
+
+class SummaryTests(OfflineTestCase):
+    """Spec 01 amendment 2026-10-28: `summary_block` re-prints the body in plain words."""
+
+    def test_a_trip_without_stops_says_no_fuel_stop_is_needed(self) -> None:
+        body = golden_with(
+            fuel_stops=[],
+            totals={**GOLDEN_BODY["totals"], "gallons_bought": 0, "total_purchase_cost": "0.00"},
+        )
+
+        summary = summary_block(body)
+
+        self.assertEqual(
+            summary["headline"],
+            "Chicago, IL → Denver, CO: 1003.2 mi, no fuel stop needed — the start tank "
+            "covers this trip ($0.00).",
+        )
+        self.assertEqual(summary["stops"], [])
+
+    def test_a_coordinate_endpoint_is_labelled_lat_comma_lon(self) -> None:
+        start = {
+            "input": {"latitude": 41.85003, "longitude": -87.65005},
+            "matched": None,
+            "location": {"type": "Point", "coordinates": [-87.65005, 41.85003]},
+        }
+
+        summary = summary_block(golden_with(start=start))
+
+        self.assertTrue(summary["headline"].startswith("41.85003, -87.65005 → Denver, CO: "))
+
+    def test_a_coordinate_finish_is_labelled_in_the_finish_line(self) -> None:
+        finish = {
+            "input": {"latitude": 39.73915, "longitude": -104.9847},
+            "matched": None,
+            "location": {"type": "Point", "coordinates": [-104.9847, 39.73915]},
+        }
+
+        summary = summary_block(golden_with(finish=finish))
+
+        self.assertEqual(
+            summary["finish"],
+            "Arrive in 39.73915, -104.9847 with 5.4 gal left. "
+            "The start tank (50.0 gal) is not charged.",
+        )
+
+    def test_an_approximate_stop_adds_the_town_level_advice(self) -> None:
+        stops = [golden_stop(0, location_quality="approximate"), golden_stop(1)]
+
+        summary = summary_block(golden_with(fuel_stops=stops))
+
+        self.assertTrue(
+            summary["stops"][0].endswith(
+                "fill up: the next stations ahead cost more. "
+                "Town-level location: check the exact exit before you go."
+            )
+        )
+        self.assertNotIn("Town-level", summary["stops"][1])
+
+    def test_each_purchase_rule_has_its_own_reason(self) -> None:
+        expected = {
+            "fill_tank": " — fill up: the next stations ahead cost more.",
+            "to_next_stop": " — just enough to reach the next, cheaper stop.",
+            "to_finish": " — enough to reach the finish.",
+        }
+        for rule, reason in expected.items():
+            with self.subTest(rule=rule):
+                body = golden_with(fuel_stops=[golden_stop(0, purchase_rule=rule)])
+
+                line = summary_block(body)["stops"][0]
+
+                self.assertTrue(line.endswith(reason), line)
+
+    def test_an_unknown_purchase_rule_is_a_bug_and_raises(self) -> None:
+        body = golden_with(fuel_stops=[golden_stop(0, purchase_rule="top_up")])
+
+        with self.assertRaises(UnknownPurchaseRule):
+            summary_block(body)
+
+    def test_one_stop_reads_1_fuel_stop(self) -> None:
+        body = golden_with(fuel_stops=[golden_stop(0)])
+
+        headline = summary_block(body)["headline"]
+
+        self.assertIn(", 1 fuel stop, ", headline)
+
+    def test_the_rounding_sentence_appears_only_with_two_or_more_stops(self) -> None:
+        sentence = (
+            "Each stop's cost is rounded to the cent and the total is rounded once, "
+            "so they can differ by a cent or two."
+        )
+        bodies = {
+            2: golden_with(),
+            1: golden_with(fuel_stops=[golden_stop(0)]),
+            0: golden_with(fuel_stops=[]),
+        }
+
+        headlines = {count: summary_block(body)["headline"] for count, body in bodies.items()}
+
+        self.assertTrue(headlines[2].endswith(f"for 56 gal. {sentence}"), headlines[2])
+        self.assertNotIn(sentence, headlines[1])
+        self.assertNotIn(sentence, headlines[0])
+
+    def test_summary_block_leaves_the_body_unchanged(self) -> None:
+        body = golden_with()
+
+        summary_block(body)
+
+        self.assertEqual(body, GOLDEN_BODY)
 
 
 class MoneyRoundingTests(ApiTestCase):
@@ -359,9 +525,10 @@ def import_stations_along_ny_la(workdir: Path) -> None:
     )
 
 
-FR24_FIELDS = {
+FR24_FIELDS = {  # plus `summary` from the 2026-10-28 readability amendment
     "plan_id",
     "map_url",
+    "summary",
     "start",
     "finish",
     "route",

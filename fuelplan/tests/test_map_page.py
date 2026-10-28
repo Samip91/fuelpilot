@@ -101,11 +101,17 @@ HIDDEN_TEXT_TAGS = frozenset({"script", "style", "title"})
 
 
 def planobj() -> dict:
-    """The saved-plan entry of the golden plan: its POST body without `meta` and `map_url`."""
+    """The saved-plan entry of the golden plan: its POST body without the per-response keys.
+
+    `meta`, `map_url` and `summary` are built per response and never saved; `route` goes
+    back to its saved place after `finish`, so the entry matches what `plan_body` stores.
+    """
     body = copy.deepcopy(GOLDEN_BODY)
-    body.pop("meta")
-    body.pop("map_url")
-    return body
+    for key in ("meta", "map_url", "summary"):
+        body.pop(key)
+    route = body.pop("route")
+    start_to_finish = {key: body.pop(key) for key in ("plan_id", "start", "finish")}
+    return {**start_to_finish, "route": route, **body}
 
 
 def seed(body: object, *, plan_id: str = PLAN_ID) -> None:
