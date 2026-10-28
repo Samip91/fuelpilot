@@ -466,7 +466,7 @@ class TripPlanner:
     ) -> tuple[FuelPlan, VerificationStatus]:
         """FR-44: ask the verifier; on `verified`, re-plan once with the measured detours."""
         verifier = self._verifier_loader()
-        # TODO(spec-03): pass backup candidates; v1 sends none (FR-44).
+        # Future work (README): road-measured detours would pass backups here; v1 sends none.
         result = verifier(route=line, chosen_stops=plan.stops, backups=[], budget=budget)
         if result.status != "verified":
             return plan, result.status
