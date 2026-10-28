@@ -9,7 +9,7 @@ Loom walkthrough: (link added after recording)
 
 ## Quick start
 
-You need **Python 3.12 or newer** (it installs Django 6.1.2, DRF 3.18.3 and python-dotenv
+You need **Python 3.12–3.14** (it installs Django 6.1.2, DRF 3.18.3 and python-dotenv
 1.2.4), git and internet (for the routing service and the map tiles). **No API key needed.**
 
 ```bash
@@ -20,7 +20,6 @@ cp .env.example .env
 # Make a secret key, then paste it after DJANGO_SECRET_KEY= in .env (the only value to set):
 python -c "from django.core.management.utils import get_random_secret_key as k; print(k())"
 python manage.py migrate
-python manage.py createcachetable
 python manage.py import_fuel_stations
 python manage.py runserver
 ```
@@ -55,9 +54,9 @@ A real first response from the final data; cuts are marked `/* … */`:
   "plan_id": "8d829f1a-3354-41d1-91b3-9ce637d22e78",
   "map_url": "http://localhost:8000/api/v1/fuel-plans/8d829f1a-3354-41d1-91b3-9ce637d22e78/map",
   "summary": {
-    "headline": "Chicago, IL → Denver, CO: 1004.8 mi, 2 fuel stops, total fuel cost $163.18 for 56 gal. Each stop's cost is rounded to the cent and the total is rounded once, so they can differ by a cent or two.",
+    "headline": "Chicago, IL → Denver, CO: 1004.8 mi, 2 fuel stops, total fuel cost $163.18 for 56 gal. Each line cost is rounded to the cent and the total is rounded once, so they can differ by a few cents.",
     "stops": [
-      "1. Mile 322.8 — KWIK STAR #932, Altoona, IA (I-80, EXIT 143 & CR-S14): arrive with 17.5 gal, buy 14 gal × $2.959 = $41.43 — just enough to reach the next, cheaper stop. Town-level location: check the exact exit before you go.",
+      "1. Mile 322.8 — KWIK STAR #932, Altoona, IA (I-80, EXIT 143 & CR-S14): arrive with 17.5 gal, buy 14 gal × $2.959 = $41.43 — just enough to reach the next stop at the same or a lower price. Town-level location: check the exact exit before you go.",
       "2. Mile 578.1 — Henderson Fuel Mart, Henderson, NE (I-80, EXIT 342): arrive with 5.9 gal, buy 42 gal × $2.899 = $121.76 — enough to reach the finish."
     ],
     "finish": "Arrive in Denver, CO with 5.2 gal left. The start tank (50.0 gal) is not charged."
@@ -98,8 +97,9 @@ Sending it again within 24 hours returns the same `plan_id` with `"routing_calls
   `planning_margin_miles` is 1 mi per stop end; `geometry` is the road line for the map: GeoJSON
   `[lon, lat]`, under 2,000 points. It comes last because it is long.
 
-Money, miles and gallons are strings (`"183.04"`); `gallons_to_buy` and
-`totals.gallons_bought` are integers. No CORS headers: call it from your server or the same origin.
+Money, miles and gallons are strings (`"183.04"`); `gallons_to_buy` and `totals.gallons_bought` are
+integers. Geometry positions have 5 decimals (~1 m); `price_per_gallon` is the CSV text as given (up to
+8 decimals) and line costs use it unrounded. No CORS headers: call it from your server or the same origin.
 
 ## Postman
 
@@ -127,17 +127,17 @@ invalid body, an unknown plan, a low-fuel start. One run sends 7 POSTs; the 30/m
   stop and at the finish) the first leg can be 450 mi. After a purchase the planner uses a 49-gal
   tank (room for whole-gallon rounding), so 440 mi. With reserve 0: 500 / 490 mi. Each stop end
   also keeps a 1-mi margin for the estimated detour. No leg is ever longer than 500 mi.
-- **Start tank.** The fuel you start with is not charged, so a short trip costs $0.00.
-- **Cheapest** means the lowest total purchase cost; ties go to fewer stops. Stations at the
-  same route mile are tried in station-ID order; another order rarely saves a cent.
+- **Start tank.** The fuel you start with is not charged, so a short trip costs $0.00. To price
+  the whole trip, send `current_fuel_gallons` equal to `reserve_gallons`.
+- **Cheapest** means the lowest total purchase cost; ties go to fewer stops. Stations at the same
+  route mile are tried in station-ID order; another order can rarely be a little cheaper (cents).
 - **Many small stops.** A stop has no cost of its own and there is no minimum purchase, so long
   trips can add short top-ups (1–8 gal) at cheaper stations: Hartford → Los Angeles has 9 stops and
   is $134 cheaper than filling up at the last station in range.
 - **Whole gallons.** "Fill" stops round down, other stops round up just enough.
 - **Rounding.** Each line cost is rounded to the cent; the total is the unrounded sum, rounded once
-  (the response above shows it too: 41.43 + 121.76 = 163.19, total 163.18). Illustrative arithmetic:
-  41 gal × $3.199 = 131.159 → 131.16 and 15 gal × $3.459 = 51.885 → 51.89. The lines add up to
-  183.05, but the total is 183.044 → **183.04**.
+  (the response above: 41.43 + 121.76 = 163.19, total 163.18). Illustrative: 41 gal × $3.199 = 131.159
+  → 131.16 and 15 gal × $3.459 = 51.885 → 51.89; the lines add up to 183.05, the total 183.044 → **183.04**.
 - **Prices** are the CSV snapshot, not live. A station listed more than once uses its
   lowest price among rows with a known position.
 - **Area.** Lower 48 states + DC only; anything else is a clear 422.

@@ -63,6 +63,8 @@ class StationIndex:
         Raises StationDataMissing when either is absent (FR-43), so a half-imported
         database is never used.
         """
+        # With IMMEDIATE transactions (settings) this read briefly takes the write lock; it
+        # runs once per process (startup warm-up, else first use), so writers barely wait.
         with transaction.atomic():
             dataset_version = (
                 DatasetImport.objects.order_by("-imported_at", "-id")

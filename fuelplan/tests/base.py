@@ -10,7 +10,7 @@ from unittest import mock
 from django.core.cache import cache
 from django.db import connection
 from django.http import HttpResponse as DjangoResponse
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.throttling import AnonRateThrottle
 
@@ -38,12 +38,8 @@ def _loopback_only_connect(sock: socket.socket, address: object) -> None:
     return _blocked_connect(sock, address)
 
 
-class OfflineTestCase(TestCase):
-    """TestCase that fails any real socket connect for the whole test.
-
-    A test class may set `allow_loopback = True` to talk to its own server on
-    127.0.0.1 (the transport deadline tests); every other address stays blocked.
-    """
+class _NetworkBlockMixin:
+    """Fails any real socket connect for the whole test (loopback only if allowed)."""
 
     allow_loopback: bool = False
 
@@ -53,6 +49,18 @@ class OfflineTestCase(TestCase):
         patcher = mock.patch.object(socket.socket, "connect", connect)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class OfflineTestCase(_NetworkBlockMixin, TestCase):
+    """TestCase that fails any real socket connect for the whole test.
+
+    A test class may set `allow_loopback = True` to talk to its own server on
+    127.0.0.1 (the transport deadline tests); every other address stays blocked.
+    """
+
+
+class OfflineTransactionTestCase(_NetworkBlockMixin, TransactionTestCase):
+    """The same network block for tests that cannot run inside a transaction (migrations)."""
 
 
 @dataclass

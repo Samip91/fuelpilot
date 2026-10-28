@@ -1,6 +1,6 @@
 {"plan_id":"6f1c2b9e-3d4a-4e1b-9c55-0a7d2f8e1b23","map_url":"http://localhost:8000/api/v1/fuel-plans/6f1c2b9e-3d4a-4e1b-9c55-0a7d2f8e1b23/map",
- "summary":{"headline":"Chicago, IL → Denver, CO: 1003.2 mi, 2 fuel stops, total fuel cost $183.04 for 56 gal. Each stop's cost is rounded to the cent and the total is rounded once, so they can differ by a cent or two.",
-   "stops":["1. Mile 412.6 — EXAMPLE TRAVEL CENTER #1, Walnut, IA (I-80, EXIT 46): arrive with 8.6 gal, buy 41 gal × $3.199 = $131.16 — fill up: the next stations ahead cost more.",
+ "summary":{"headline":"Chicago, IL → Denver, CO: 1003.2 mi, 2 fuel stops, total fuel cost $183.04 for 56 gal. Each line cost is rounded to the cent and the total is rounded once, so they can differ by a few cents.",
+   "stops":["1. Mile 412.6 — EXAMPLE TRAVEL CENTER #1, Walnut, IA (I-80, EXIT 46): arrive with 8.6 gal, buy 41 gal × $3.199 = $131.16 — fill up: the next stop costs more.",
     "2. Mile 844.6 — EXAMPLE TRAVEL CENTER #2, Sterling, CO (I-76, EXIT 125): arrive with 6.3 gal, buy 15 gal × $3.459 = $51.89 — enough to reach the finish."],
    "finish":"Arrive in Denver, CO with 5.4 gal left. The start tank (50.0 gal) is not charged."},
  "start":{"input":{"city":"Chicago","state":"IL"},"matched":"Chicago, IL","location":{"type":"Point","coordinates":[-87.65005,41.85003]}},

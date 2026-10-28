@@ -9,6 +9,14 @@ import json
 
 from django.test import override_settings
 
+from fuelplan.serializers import (
+    ARRIVAL_ROUNDING_NOTE,
+    DETOUR_NOTE,
+    MONEY_NOTE,
+    PRICE_NOTE,
+    SAME_POINT_NOTE,
+    WHOLE_GALLON_NOTE,
+)
 from fuelplan.stations import StationIndex
 
 from .base import ApiTestCase, assert_envelope
@@ -378,6 +386,74 @@ class ShortTripTests(PlanApiTestCase):
             "with 20.0 gal left.",
         )
         self.assertEqual(self.calls, 1)
+
+    def test_a_trip_with_no_stop_leaves_out_the_detour_money_and_whole_gallon_notes(
+        self,
+    ) -> None:
+        self.harness.index = synthetic_index([station(1, point=meridian_point(30.0))])
+        self.harness.queue(meridian_reply(300.0))
+
+        body = self.assert_ok(self.post_json(meridian_request(300.0)))
+
+        self.assertEqual(
+            body["notes"],
+            [
+                "No fuel stop is needed: the start tank (50.0 gal) covers the 300.0-mile trip "
+                "with 20.0 gal left.",
+                "Start tank (50.0 gal) is not charged; 20.0 gal left at finish.",
+                PRICE_NOTE,
+                ARRIVAL_ROUNDING_NOTE,
+            ],
+        )
+
+    def test_start_equal_to_finish_leaves_out_the_stop_notes_too(self) -> None:
+        body = self.assert_ok(self.post_json({"start": CHICAGO_POINT, "finish": CHICAGO_POINT}))
+
+        self.assertEqual(
+            body["notes"],
+            [
+                SAME_POINT_NOTE,
+                "Start tank (50.0 gal) is not charged; 50.0 gal left at finish.",
+                PRICE_NOTE,
+                ARRIVAL_ROUNDING_NOTE,
+            ],
+        )
+
+    def test_one_stop_keeps_the_detour_and_whole_gallon_notes_but_not_the_money_note(
+        self,
+    ) -> None:
+        # With one stop its line cost is the total, so there is no rounding to explain.
+        self.harness.index = synthetic_index([station(1, point=meridian_point(30.0))])
+        self.harness.queue(meridian_reply(300.0))
+
+        body = self.assert_ok(self.post_json(meridian_request(300.0, current_fuel_gallons=10)))
+
+        self.assertEqual(len(body["fuel_stops"]), 1)
+        for note in (DETOUR_NOTE, WHOLE_GALLON_NOTE):
+            with self.subTest(note=note):
+                self.assertEqual(body["notes"].count(note), 1)
+        self.assertNotIn(MONEY_NOTE, body["notes"])
+        self.assertNotIn(MONEY_NOTE, body["summary"]["headline"])
+
+    def test_a_fill_whose_next_stop_merged_away_gets_the_neutral_reason_in_the_summary(
+        self,
+    ) -> None:
+        # The optimiser's merge hand case: B rounds to 0 gal, so A's fill reaches the finish.
+        self.harness.index = synthetic_index(
+            [
+                station(1, point=meridian_point(100.0), price="3.000"),
+                station(2, point=meridian_point(300.0), price="3.500"),
+            ]
+        )
+        self.harness.queue(meridian_reply(549.0))
+
+        body = self.assert_ok(self.post_json(meridian_request(549.0)))
+
+        [stop] = body["fuel_stops"]
+        self.assertEqual((stop["purchase_rule"], stop["gallons_to_buy"]), ("fill_tank", 10))
+        [line] = body["summary"]["stops"]
+        self.assertTrue(line.endswith(" — fill up."), line)
+        self.assertNotIn("costs more", line)
 
     def test_low_start_fuel_buys_just_enough_at_mile_30(self) -> None:
         # TC-24, low fuel: arrive 7.0, buy ceil(5 + 271/10 - 7.0) = 26 at 3.000.

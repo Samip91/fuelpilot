@@ -177,7 +177,22 @@ class RequestValidationHttpTests(ApiTestCase):
             "bad state code": (
                 _with_start({"city": "Chicago", "state": "XX"}),
                 "start.state",
-                "XX is not a US state code; use a 2-letter USPS code such as IL.",
+                '"XX" is not a US state code; use a 2-letter USPS code, e.g. IL.',
+            ),
+            "full state name": (
+                _with_start({"city": "Chicago", "state": "Illinois"}),
+                "start.state",
+                '"Illinois" is not a 2-letter state code; use the USPS code, e.g. IL.',
+            ),
+            "one letter": (
+                _with_start({"city": "Chicago", "state": "I"}),
+                "start.state",
+                '"I" is not a 2-letter state code; use the USPS code, e.g. IL.',
+            ),
+            "three letters": (
+                _with_start({"city": "Chicago", "state": "ILL"}),
+                "start.state",
+                '"ILL" is not a 2-letter state code; use the USPS code, e.g. IL.',
             ),
             "long city": (
                 _with_start({"city": "a" * 101, "state": "KS"}),
@@ -329,6 +344,19 @@ class FuelInputTests(OfflineTestCase):
             {
                 "reserve_gallons": [
                     "reserve_gallons (12.0) must not be more than current_fuel_gallons (10.0)."
+                ]
+            },
+        )
+
+    def test_a_reserve_left_at_its_default_is_named_as_the_default(self) -> None:
+        errors = self._rejection(current_fuel_gallons=3)
+
+        self.assertEqual(
+            errors,
+            {
+                "reserve_gallons": [
+                    "reserve_gallons (default 5.0) must not be more than "
+                    "current_fuel_gallons (3.0)."
                 ]
             },
         )
