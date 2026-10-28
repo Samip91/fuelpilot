@@ -329,16 +329,22 @@ class LazyValue[T]:
         return self._value
 
 
-# Loaded separately: a coordinate-only request never pays the gazetteer's ~1.5 s / ~138 MB.
+# Separate values so each loads and fails on its own; `planner.warm_up` loads both at server start.
 _gazetteer = LazyValue(lambda: Gazetteer.from_tsv(PLACES_PATH))
 _boundary = LazyValue(lambda: Boundary.from_geojson(BOUNDARY_PATH))
 
 
 def get_gazetteer() -> Gazetteer:
-    """The process-wide gazetteer from `data/us_places.tsv`, loaded on first use."""
+    """The process-wide gazetteer from `data/us_places.tsv`.
+
+    Loaded at server start by `planner.warm_up`, else on first use.
+    """
     return _gazetteer.get()
 
 
 def get_boundary() -> Boundary:
-    """The process-wide boundary from `data/us_lower48_dc.geojson`, loaded on first use."""
+    """The process-wide boundary from `data/us_lower48_dc.geojson`.
+
+    Loaded at server start by `planner.warm_up`, else on first use.
+    """
     return _boundary.get()

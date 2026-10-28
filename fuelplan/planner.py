@@ -24,9 +24,9 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.cache import caches
 from django.core.cache.backends.base import BaseCache
-from django.db import DatabaseError
+from django.db import DatabaseError, connections
 
-from .errors import InternalError, JsonValue
+from .errors import InternalError, JsonValue, StationDataMissing
 from .geo import (
     ROUTE_TOLERANCE_MILES,
     LonLat,
@@ -531,3 +531,45 @@ def build_trip_planner() -> TripPlanner:
         cache=caches["default"],
         plan_ttl_s=settings.FUELPILOT_PLAN_TTL_S,
     )
+
+
+def warm_up() -> None:
+    """Load the boundary, places and station index once, before the server takes requests.
+
+    Called from `config/wsgi.py`, so only runserver and gunicorn pay it (migrate and tests
+    never import that module); it makes no external call. Boundary and places are tracked
+    files, so their errors propagate (fail fast); missing station data only logs a warning.
+    """
+    try:
+        get_boundary()
+        get_gazetteer()
+        stations = _load_stations_for_warm_up()
+        if stations is not None:
+            logger.info(
+                "Startup warm-up loaded %s stations (dataset %s), places and boundary",
+                len(stations),
+                stations.dataset_version,
+            )
+    finally:
+        # Like runserver after its migration check: no connection opened here is kept
+        # for the serving threads. Closes only this (the calling) thread's connections.
+        connections.close_all()
+
+
+def _load_stations_for_warm_up() -> StationIndex | None:
+    """The station index, or None after logging why it is missing.
+
+    The server still starts: a failed load is not kept, so requests answer FR-43 until
+    `migrate` and the import run, and then the next request loads the stations (no restart).
+    """
+    try:
+        return get_station_index()
+    except (StationDataMissing, DatabaseError) as error:
+        logger.warning(
+            "Startup warm-up could not load stations (%s: %s); requests report it until "
+            "`python manage.py migrate` and `python manage.py import_fuel_stations` run, "
+            "then the next request loads them",
+            type(error).__name__,
+            error,
+        )
+        return None

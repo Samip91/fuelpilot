@@ -207,8 +207,8 @@ class CallBudgetExceeded(InternalError):
 
 
 STATION_DATA_MISSING_MESSAGE = (
-    "Station data not imported. Run `python manage.py import_fuel_stations`, "
-    "then restart the server."
+    "Station data not imported. Run `python manage.py import_fuel_stations`; "
+    "the next request loads it."
 )
 
 

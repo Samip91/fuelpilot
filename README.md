@@ -28,6 +28,7 @@ python manage.py runserver
 `import_fuel_stations` needs no key and no network. Its summary: 8,151 rows read, 0 invalid,
 620 non-US rows dropped, 867 duplicate IDs merged, 219 unresolved, 0 missing a location,
 **6,445 stations imported**, dataset `sha256:965a7240…`. Restart the server after a re-import.
+At start the server logs `Startup warm-up loaded 6445 stations …` (about 2 s); a warning instead means migrate or the import has not run yet.
 
 ## Your first request
 
@@ -200,8 +201,8 @@ demo server. "As above": Intel i7-9750HF laptop, Python 3.12.3, 2026-10-28, `sha
 
 | What | Result | Runs, statistic | Machine, date, dataset |
 |---|---|---|---|
-| First request per process (plan cached, 0 calls; loads stations and places) | 1.63 s; memory +152 MiB (RSS) | 3 restarts, median (1.60–1.68 s) | as above |
-| Cold request (1 routing call) | 1.63 s | 5, median (1.56–3.08 s) | as above |
+| Server start warm-up (loads stations, places and boundary, once per process, before serving) | 1.72 s; memory +155 MiB (RSS) | 3 restarts, median (1.70–1.73 s) | as above |
+| Cold request (1 routing call, warmed process) | 1.68 s | 5, median (1.53–1.75 s) | as above |
 | Cache hit (0 calls) | 10 ms | 20, median (max 14 ms) | as above |
 | Map page (21,615 B) | 3.6 ms | 20, median (max 7.8 ms) | as above |
 | Local work, New York → Los Angeles (route cached, 0 calls) | 179 ms | 5, median (175–181 ms) | as above |

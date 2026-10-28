@@ -543,7 +543,7 @@ class Command(BaseCommand):
                 f"{result.counts.location_missing:,}. {self._missing_location_fix(source)}"
             )
         self.stdout.write(
-            "Restart the server (python manage.py runserver) so it loads this dataset."
+            "If the server is already serving plans, restart it so it loads this dataset."
         )
 
     def _missing_location_fix(self, source: LocationsSource) -> str:
