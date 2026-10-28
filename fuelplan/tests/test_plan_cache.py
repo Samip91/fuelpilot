@@ -246,6 +246,20 @@ class MetaTests(PlanCacheTestCase):
         self.assertEqual(body["start"]["input"], CHICAGO_POINT)
         self.assertIsNone(body["start"]["matched"])
 
+    def test_a_plan_hit_summary_names_this_requests_places(self) -> None:
+        # Saved from a city request, hit from coordinates at the same 5-dp point.
+        self.plan_ok({"start": {"city": "Chicago", "state": "IL"}, "finish": CHICAGO_POINT})
+
+        body = self.plan_ok({"start": CHICAGO_POINT, "finish": CHICAGO_POINT})
+
+        self.assertEqual(body["meta"]["plan_cache"], "hit")
+        self.assertEqual(
+            body["summary"]["headline"],
+            "41.85003, -87.65005 → 41.85003, -87.65005: 0.0 mi, no fuel stop needed — "
+            "the start tank covers this trip ($0.00).",
+        )
+        self.assertNotIn("summary", cache.get(planobj_cache_key(body["plan_id"])))
+
     @override_settings(ALLOWED_HOSTS=["testserver", "localhost"])
     def test_a_plan_hit_builds_map_url_from_this_requests_host(self) -> None:
         first = self.plan_ok(meridian_request(300.0), reply=meridian_reply(300.0))

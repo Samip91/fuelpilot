@@ -1,5 +1,6 @@
 """Shared test helpers: no test may reach the network (spec 01 NFR-8)."""
 
+import copy
 import json
 import socket
 from dataclasses import dataclass, field
@@ -175,11 +176,26 @@ CACHE_TABLE = "fuelpilot_cache"
 CACHE_KEY_PREFIX = ":1:"  # Django's default key prefix and version
 
 
+STUB_ENDPOINT = {"matched": "Stubville, TX", "location": {"type": "Point", "coordinates": [0, 0]}}
+# Only the fields the response summary reads, so the view can build a full answer.
+STUB_PLAN_BODY = {
+    "plan_id": STUB_PLAN_ID,
+    "reached": "planner",
+    "start": STUB_ENDPOINT,
+    "finish": STUB_ENDPOINT,
+    "route": {"distance_miles": "0.0"},
+    "fuel_stops": [],
+    "finish_fuel_on_arrival_gallons": "50.0",
+    "totals": {"gallons_bought": 0, "total_purchase_cost": "0.00"},
+    "assumptions": {"start_fuel_gallons": "50.0"},
+}
+
+
 def stub_outcome(*, routing_calls: int = 0) -> PlanOutcome:
     """A minimal planner answer for tests that stop at the view (validation, call counts)."""
     return PlanOutcome(
         plan_id=STUB_PLAN_ID,
-        body={"plan_id": STUB_PLAN_ID, "reached": "planner"},
+        body=copy.deepcopy(STUB_PLAN_BODY),
         meta=Meta(routing_calls=routing_calls, route_cache="miss", plan_cache="miss"),
     )
 

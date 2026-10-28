@@ -481,9 +481,98 @@ def plan_body(facts: PlanFacts) -> dict[str, JsonValue]:
 def response_body(
     *, saved: Mapping[str, JsonValue], map_url: str, meta: Mapping[str, JsonValue]
 ) -> dict[str, JsonValue]:
-    """The §7a order: `plan_id`, `map_url`, the saved fields, then `meta` (built per response)."""
-    fields = {key: value for key, value in saved.items() if key != "plan_id"}
-    return {"plan_id": saved["plan_id"], "map_url": map_url, **fields, "meta": dict(meta)}
+    """The §7a order: `plan_id`, `map_url`, `summary`, the saved fields, `meta`, then `route`.
+
+    `saved` already carries this request's start/finish echo (the planner merges it on a
+    plan hit), so the summary always names the places this request sent. The summary and
+    `meta` are built per response and never saved; `route` goes last because its geometry
+    is long and would push everything else out of sight.
+    """
+    fields = {key: value for key, value in saved.items() if key not in ("plan_id", "route")}
+    return {
+        "plan_id": saved["plan_id"],
+        "map_url": map_url,
+        "summary": summary_block(saved),
+        **fields,
+        "meta": dict(meta),
+        "route": saved["route"],
+    }
+
+
+# --- The human-readable summary (spec 01 amendment 2026-10-28, response readability) ------
+
+REASON_TEXT = {
+    "fill_tank": "fill up: the next stations ahead cost more",
+    "to_next_stop": "just enough to reach the next, cheaper stop",
+    "to_finish": "enough to reach the finish",
+}
+APPROXIMATE_STOP_TEXT = " Town-level location: check the exact exit before you go."
+# Only with 2+ stops: then the shown line costs can add up to a cent or two off the total.
+ROUNDING_TEXT = (
+    " Each stop's cost is rounded to the cent and the total is rounded once, "
+    "so they can differ by a cent or two."
+)
+
+
+class UnknownPurchaseRule(Exception):
+    """A stop's `purchase_rule` has no summary text: a bug, left unhandled → logged 500."""
+
+
+def summary_block(body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """`headline`, one line per stop and `finish`, in plain words for a person to read.
+
+    Pure: it only re-prints values already in the body (strings rounded for display), so
+    the summary can never disagree with the fields below it.
+    """
+    start, finish = _place_label(body["start"]), _place_label(body["finish"])
+    return {
+        "headline": _headline(body, start=start, finish=finish),
+        "stops": [_stop_line(stop) for stop in body["fuel_stops"]],
+        "finish": (
+            f"Arrive in {finish} with {body['finish_fuel_on_arrival_gallons']} gal left. "
+            f"The start tank ({body['assumptions']['start_fuel_gallons']} gal) is not charged."
+        ),
+    }
+
+
+def _place_label(endpoint: Mapping[str, JsonValue]) -> str:
+    """The matched place name, else "lat, lon" from the stored [lon, lat], as the map shows."""
+    if endpoint["matched"] is not None:
+        return endpoint["matched"]
+    lon, lat = endpoint["location"]["coordinates"]
+    return f"{lat}, {lon}"
+
+
+def _headline(body: Mapping[str, JsonValue], *, start: str, finish: str) -> str:
+    trip = f"{start} → {finish}: {body['route']['distance_miles']} mi"
+    totals = body["totals"]
+    stop_count = len(body["fuel_stops"])
+    if not stop_count:
+        return (
+            f"{trip}, no fuel stop needed — the start tank covers this trip "
+            f"(${totals['total_purchase_cost']})."
+        )
+    stops_text = "1 fuel stop" if stop_count == 1 else f"{stop_count} fuel stops"
+    rounding_text = ROUNDING_TEXT if stop_count >= 2 else ""
+    return (
+        f"{trip}, {stops_text}, total fuel cost ${totals['total_purchase_cost']} "
+        f"for {totals['gallons_bought']} gal.{rounding_text}"
+    )
+
+
+def _stop_line(stop: Mapping[str, JsonValue]) -> str:
+    rule = stop["purchase_rule"]
+    if rule not in REASON_TEXT:
+        raise UnknownPurchaseRule(f"no summary text for purchase_rule {rule!r}")
+    line = (
+        f"{stop['sequence']}. Mile {stop['route_mile']} — {stop['name']}, {stop['city']}, "
+        f"{stop['state']} ({stop['address']}): arrive with {stop['fuel_on_arrival_gallons']} "
+        f"gal, buy {stop['gallons_to_buy']} gal × ${stop['price_per_gallon']} = "
+        f"${stop['line_cost']} — {REASON_TEXT[rule]}."
+    )
+    if stop["location_quality"] == "approximate":
+        line += APPROXIMATE_STOP_TEXT
+    return line
 
 
 def _stop_json(stop: PlannedStop, *, sequence: int, stations: StationIndex) -> dict[str, JsonValue]:
