@@ -104,9 +104,12 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
-        # Wait at most 2 s for a lock (cache writes and the call slot share the file), so
-        # the 2 s provider-slot wait stays a bound of about 4 s, not Python's 5 s default.
-        "OPTIONS": {"timeout": 2},
+        # Cache writes and the call slot share this file. IMMEDIATE takes the write lock when
+        # a transaction starts, so a writer that meets another one waits up to `timeout`
+        # (2 s) for it; a default (deferred) transaction that reads and then writes fails at
+        # once with "database is locked" instead. 2 s, not Python's 5 s default, keeps the
+        # provider-slot wait (also 2 s, with its locked retries) at about 4–6 s at most.
+        "OPTIONS": {"timeout": 2, "transaction_mode": "IMMEDIATE"},
     }
 }
 

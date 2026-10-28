@@ -14,7 +14,15 @@ PURCHASE_RULE_TEXT: Mapping[str, str] = {
     "to_next_stop": "just enough",
     "to_finish": "just enough",
 }
-ROUNDING_LINE = "(each stop cost is rounded to the cent; the total is rounded once)"
+# The one rounding wording, also used by the response notes and summary (serializers).
+# It lives here because this module must stay standard-library only.
+MONEY_NOTE = (
+    "Each line cost is rounded to the cent and the total is rounded once, "
+    "so they can differ by a few cents."
+)
+# With one stop its line cost is the total, so rounding can only differ from 2 stops on.
+MIN_STOPS_FOR_ROUNDING_NOTE = 2
+ROUNDING_LINE = f"({MONEY_NOTE})"
 ZERO_STOP_MESSAGE = "No fuel stop needed. Total fuel cost $0.00 — the start tank covers this trip."
 LOCATION_LEGEND = (
     "Location: poi_match = matched to the station itself · address_match = matched to its "
@@ -97,10 +105,11 @@ def _header_lines(
     *, route: object, totals: object, assumptions: object, finish_gallons: str, stop_count: int
 ) -> tuple[str, ...]:
     stops_text = f"{stop_count} fuel stop" + ("" if stop_count == 1 else "s")
+    rounding_lines = (ROUNDING_LINE,) if stop_count >= MIN_STOPS_FOR_ROUNDING_NOTE else ()
     return (
         f"Total fuel cost ${_text(totals, 'total_purchase_cost')} · "
         f"{_whole(totals, 'gallons_bought')} gal bought · {stops_text}",
-        ROUNDING_LINE,
+        *rounding_lines,
         f"Route {_text(route, 'distance_miles')} mi · "
         f"driven {_text(route, 'driven_distance_miles')} mi incl. detours · "
         f"finish with {finish_gallons} gal · "

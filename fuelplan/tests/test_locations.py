@@ -26,12 +26,17 @@ from fuelplan.locations import (
     normalise_place_name,
     polygon_from_rings,
 )
-from fuelplan.regions import KNOWN_REGION_CODES
+from fuelplan.regions import KNOWN_REGION_CODES, OUTSIDE_SERVICE_AREA
 
 from .base import OfflineTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIELDS = ("start", "finish")
+# FR-4, written out from the spec rather than read from the code under test.
+REJECTED_US_CODES = ("AK", "HI", "PR", "GU", "VI", "AS", "MP")
+REJECTED_CANADIAN_CODES = (
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+)  # fmt: skip
 SCOPE = "contiguous US + DC"
 
 # Each point is at least 4.9 km from the Census 5m border (checked with ray casting).
@@ -160,6 +165,15 @@ class StateCodeTests(OfflineTestCase):
         for code in ("KS", "DC", "AK", "ON", "PR"):
             with self.subTest(code=code):
                 self.assertIn(code, KNOWN_REGION_CODES)
+
+    def test_all_20_spec_codes_outside_the_service_area_are_unsupported(self) -> None:
+        codes = REJECTED_US_CODES + REJECTED_CANADIAN_CODES
+        self.assertEqual(len(set(codes)), 20)
+        self.assertEqual(OUTSIDE_SERVICE_AREA, frozenset(codes))
+        for code in codes:
+            with self.subTest(code=code), self.assertRaises(UnsupportedLocation) as raised:
+                self.resolver.resolve_city(field="start", city="Anywhere", state=code)
+            _assert_unsupported(self, raised.exception, field="start")
 
     def test_states_and_provinces_outside_the_service_area_are_unsupported(self) -> None:
         for state in ("AK", "HI", "PR", "GU", "ON", "on", " qc "):

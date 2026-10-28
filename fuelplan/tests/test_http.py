@@ -179,6 +179,42 @@ class TransportLimitTests(OfflineTestCase):
         self.assertEqual(cls.call_args.kwargs["timeout"], 1)
 
 
+class SocketTimeoutTests(OfflineTestCase):
+    """A socket `TimeoutError` at any step is a `TransportTimeout` (504), never a 502."""
+
+    def _request_with(self, connection: mock.Mock) -> None:
+        # The watchdog timer is faked so it can never fire on the mocked socket.
+        with (
+            mock.patch.object(http.client, "HTTPConnection", return_value=connection),
+            mock.patch("fuelplan.http.threading.Timer"),
+        ):
+            HttpClientTransport().request(
+                method="GET",
+                url="http://osrm.test/route",
+                connect_timeout_s=1,
+                total_timeout_s=5,
+                max_bytes=10,
+            )
+
+    def test_a_connect_that_times_out_is_a_transport_timeout(self) -> None:
+        connection = mock.Mock()
+        connection.connect.side_effect = TimeoutError("timed out")
+
+        with self.assertRaises(TransportTimeout):
+            self._request_with(connection)
+
+    def test_a_response_that_times_out_before_the_watchdog_fires_is_a_transport_timeout(
+        self,
+    ) -> None:
+        connection = mock.Mock()
+        connection.getresponse.side_effect = TimeoutError("timed out")
+
+        with self.assertRaises(TransportTimeout):
+            self._request_with(connection)
+
+        connection.request.assert_called_once()  # the request went out; the reply was late
+
+
 class UrlCheckTests(OfflineTestCase):
     def test_schemes_other_than_http_and_https_are_refused(self) -> None:
         for url in ("file:///etc/passwd", "ftp://example.com/x", "gopher://example.com/"):

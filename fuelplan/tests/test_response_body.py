@@ -15,21 +15,26 @@ import tempfile
 from decimal import ROUND_HALF_UP, Decimal
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from django.core.management import call_command
 
+from fuelplan import geo, optimizer, serializers
 from fuelplan.fuel_csv import parse_row
 from fuelplan.geo import RouteCorridor, build_route_line, miles_from_meters
 from fuelplan.geocoding import LOCATION_FILE_COLUMNS
 from fuelplan.optimizer import Candidate, FuelPlan, plan_fuel_stops
 from fuelplan.regions import LOWER_48_AND_DC
 from fuelplan.serializers import (
+    MONEY_NOTE,
+    PlanFacts,
     UnknownPurchaseRule,
     arrival_text,
     gallons_text,
     gap_leg_text,
     miles_text,
     money_text,
+    plan_body,
     snap_miles,
     summary_block,
 )
@@ -148,6 +153,15 @@ class GoldenBodyTests(ApiTestCase):
             ],
         )
 
+    def test_two_stops_carry_the_money_note_once_in_notes_and_headline(self) -> None:
+        self.harness.queue_fixture("chicago_denver")
+
+        body = json_body(self.post_json(GOLDEN_REQUEST))
+
+        self.assertEqual(len(body["fuel_stops"]), 2)
+        self.assertEqual(body["notes"].count(MONEY_NOTE), 1)
+        self.assertTrue(body["summary"]["headline"].endswith(f" {MONEY_NOTE}"))
+
     def test_golden_chicago_denver(self) -> None:
         self.harness.queue_fixture("chicago_denver")
 
@@ -258,25 +272,65 @@ class SummaryTests(OfflineTestCase):
 
         self.assertTrue(
             summary["stops"][0].endswith(
-                "fill up: the next stations ahead cost more. "
+                "fill up: the next stop costs more. "
                 "Town-level location: check the exact exit before you go."
             )
         )
         self.assertNotIn("Town-level", summary["stops"][1])
 
-    def test_each_purchase_rule_has_its_own_reason(self) -> None:
-        expected = {
-            "fill_tank": " — fill up: the next stations ahead cost more.",
-            "to_next_stop": " — just enough to reach the next, cheaper stop.",
-            "to_finish": " — enough to reach the finish.",
+    def test_a_fill_says_the_next_stop_costs_more_only_when_it_does(self) -> None:
+        # After a replay merge the next kept stop can be cheaper (or there is none).
+        rows = {
+            "next stop dearer": ("3.500", " — fill up: the next stop costs more."),
+            "next stop same price": ("3.199", " — fill up."),
+            "next stop cheaper": ("2.999", " — fill up."),
         }
-        for rule, reason in expected.items():
-            with self.subTest(rule=rule):
-                body = golden_with(fuel_stops=[golden_stop(0, purchase_rule=rule)])
+        for name, (next_price, reason) in rows.items():
+            with self.subTest(name):
+                stops = [golden_stop(0), golden_stop(1, price_per_gallon=next_price)]
 
-                line = summary_block(body)["stops"][0]
+                line = summary_block(golden_with(fuel_stops=stops))["stops"][0]
 
                 self.assertTrue(line.endswith(reason), line)
+
+    def test_a_fill_with_no_stop_after_it_uses_the_neutral_reason(self) -> None:
+        body = golden_with(fuel_stops=[golden_stop(0, purchase_rule="fill_tank")])
+
+        line = summary_block(body)["stops"][0]
+
+        self.assertTrue(line.endswith(" — fill up."), line)
+
+    def test_just_enough_names_a_same_or_lower_price_only_when_the_next_stop_has_one(
+        self,
+    ) -> None:
+        rows = {
+            "next stop cheaper": (
+                "2.999",
+                " — just enough to reach the next stop at the same or a lower price.",
+            ),
+            "next stop same price": (
+                "3.199",
+                " — just enough to reach the next stop at the same or a lower price.",
+            ),
+            "next stop dearer": ("3.500", " — just enough to reach the next stop."),
+        }
+        for name, (next_price, reason) in rows.items():
+            with self.subTest(name):
+                stops = [
+                    golden_stop(0, purchase_rule="to_next_stop"),
+                    golden_stop(1, price_per_gallon=next_price),
+                ]
+
+                line = summary_block(golden_with(fuel_stops=stops))["stops"][0]
+
+                self.assertTrue(line.endswith(reason), line)
+
+    def test_a_purchase_to_the_finish_says_enough_to_reach_the_finish(self) -> None:
+        body = golden_with(fuel_stops=[golden_stop(0, purchase_rule="to_finish")])
+
+        line = summary_block(body)["stops"][0]
+
+        self.assertTrue(line.endswith(" — enough to reach the finish."), line)
 
     def test_an_unknown_purchase_rule_is_a_bug_and_raises(self) -> None:
         body = golden_with(fuel_stops=[golden_stop(0, purchase_rule="top_up")])
@@ -293,8 +347,8 @@ class SummaryTests(OfflineTestCase):
 
     def test_the_rounding_sentence_appears_only_with_two_or_more_stops(self) -> None:
         sentence = (
-            "Each stop's cost is rounded to the cent and the total is rounded once, "
-            "so they can differ by a cent or two."
+            "Each line cost is rounded to the cent and the total is rounded once, "
+            "so they can differ by a few cents."
         )
         bodies = {
             2: golden_with(),
@@ -314,6 +368,48 @@ class SummaryTests(OfflineTestCase):
         summary_block(body)
 
         self.assertEqual(body, GOLDEN_BODY)
+
+
+class ConstantSourceTests(OfflineTestCase):
+    """Brief review-fixes 6: tank, reserve and detour limits have one definition each."""
+
+    def test_the_serializer_uses_the_optimizer_and_geo_constants(self) -> None:
+        self.assertIs(serializers.TANK_GALLONS, optimizer.TANK_GALLONS)
+        self.assertIs(serializers.MAX_RESERVE_GALLONS, optimizer.MAX_RESERVE_GALLONS)
+        self.assertIs(serializers.MAX_DETOUR_MILES, geo.MAX_DETOUR_MILES)
+
+    def test_the_max_detour_assumption_is_built_from_the_constant_not_hard_coded(self) -> None:
+        plan = plan_fuel_stops(
+            route_miles=Decimal("100"),
+            candidates=[],
+            start_gallons=Decimal("50"),
+            reserve_gallons=Decimal("5"),
+        )
+        facts = PlanFacts(
+            plan_id="p",
+            start_echo={},
+            finish_echo={},
+            route_miles=Decimal("100"),
+            geometry=(),
+            snap_m=None,
+            plan=plan,
+            stations=synthetic_index([]),
+            start_gallons=Decimal("50"),
+            reserve_gallons=Decimal("5"),
+            algorithm_version="test",
+            is_same_point=False,
+        )
+
+        with mock.patch.object(serializers, "MAX_DETOUR_MILES", Decimal("4.0")):
+            body = plan_body(facts)
+
+        self.assertEqual(body["assumptions"]["max_detour_miles"], "4.0")
+
+    def test_the_fuel_limits_follow_the_optimizer_constants(self) -> None:
+        fields = serializers.PlanRequestSerializer().fields
+
+        self.assertEqual(fields["current_fuel_gallons"].maximum, optimizer.TANK_GALLONS)
+        self.assertEqual(fields["reserve_gallons"].maximum, optimizer.MAX_RESERVE_GALLONS)
 
 
 class MoneyRoundingTests(ApiTestCase):

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "FuelPilot",
-    "description": "FuelPilot API: 9 requests with tests. Set `base_url` if the server is not on http://localhost:8000. Request 1 saves `plan_id` for request 6. One run sends 7 POSTs; the API allows 30 POSTs a minute, so a 5th run within one minute gets 429.",
+    "description": "FuelPilot API: 9 requests with tests. Set `base_url` if the server is not on http://localhost:8000. Request 1 saves `plan_id` (only on a 200) for request 6, which skips itself without one. One run sends 7 POSTs; the API allows 30 POSTs a minute, so a 5th run within one minute gets 429.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -16,13 +16,16 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(200));",
                   "pm.test(\"routing_calls is 0 or 1\", () => pm.expect([0, 1]).to.include(body.meta.routing_calls));",
                   "pm.test(\"at least 2 fuel stops\", () => pm.expect(body.fuel_stops.length).to.be.at.least(2));",
                   "pm.test(\"total is money text\", () => pm.expect(body.totals.total_purchase_cost).to.match(/^\\d+\\.\\d{2}$/));",
                   "pm.test(\"map_url points to this plan's map\", () => pm.expect(body.map_url.endsWith(\"/fuel-plans/\" + body.plan_id + \"/map\")).to.be.true);",
-                  "pm.collectionVariables.set(\"plan_id\", body.plan_id);"
+                  "// Only a 200 has a plan to show; request 6 skips itself when plan_id is empty.",
+                  "pm.collectionVariables.set(\"plan_id\", pm.response.code === 200 ? body.plan_id : \"\");"
                 ]
               }
             }
@@ -67,8 +70,10 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(200));",
                   "pm.test(\"routing_calls is 0\", () => pm.expect(body.meta.routing_calls).to.eql(0));",
                   "pm.test(\"same plan_id as request 1\", () => pm.expect(body.plan_id).to.eql(pm.collectionVariables.get(\"plan_id\")));"
                 ]
@@ -115,8 +120,10 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(200));",
                   "pm.test(\"no fuel stops\", () => pm.expect(body.fuel_stops).to.eql([]));",
                   "pm.test(\"total is 0.00\", () => pm.expect(body.totals.total_purchase_cost).to.eql(\"0.00\"));",
                   "pm.test(\"start.matched is null\", () => pm.expect(body.start.matched).to.be.null);"
@@ -164,8 +171,11 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 422\", () => pm.response.to.have.status(422));",
-                  "pm.test(\"error code is unsupported_location\", () => pm.expect(pm.response.json().error.code).to.eql(\"unsupported_location\"));"
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 422\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(422));",
+                  "pm.test(\"error code is unsupported_location\", () => pm.expect(body.error.code).to.eql(\"unsupported_location\"));"
                 ]
               }
             }
@@ -210,9 +220,12 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 422\", () => pm.response.to.have.status(422));",
-                  "pm.test(\"error code is no_feasible_plan\", () => pm.expect(pm.response.json().error.code).to.eql(\"no_feasible_plan\"));",
-                  "pm.test(\"details present\", () => pm.expect(pm.response.json().error.details).to.be.an(\"object\"));"
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 422\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(422));",
+                  "pm.test(\"error code is no_feasible_plan\", () => pm.expect(body.error.code).to.eql(\"no_feasible_plan\"));",
+                  "pm.test(\"details present\", () => pm.expect(body.error.details).to.be.an(\"object\"));"
                 ]
               }
             }
@@ -253,6 +266,22 @@
           "name": "6. Map page",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Without a plan_id from request 1 there is no map to open: skip, do not fail.",
+                  "// Older runners have no pm.execution.skipRequest; they send the request and its tests fail.",
+                  "if (!pm.collectionVariables.get(\"plan_id\")) {",
+                  "  console.log(\"Request 6 skipped: request 1 did not return a plan_id.\");",
+                  "  if (pm.execution && pm.execution.skipRequest) {",
+                  "    pm.execution.skipRequest();",
+                  "  }",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -291,8 +320,11 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 400\", () => pm.response.to.have.status(400));",
-                  "pm.test(\"error code is invalid_request\", () => pm.expect(pm.response.json().error.code).to.eql(\"invalid_request\"));"
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 400\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(400));",
+                  "pm.test(\"error code is invalid_request\", () => pm.expect(body.error.code).to.eql(\"invalid_request\"));"
                 ]
               }
             }
@@ -337,8 +369,11 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));",
-                  "pm.test(\"error code is plan_not_found\", () => pm.expect(pm.response.json().error.code).to.eql(\"plan_not_found\"));"
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 404\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(404));",
+                  "pm.test(\"error code is plan_not_found\", () => pm.expect(body.error.code).to.eql(\"plan_not_found\"));"
                 ]
               }
             }
@@ -371,8 +406,10 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
+                  "// Read the body once; a non-JSON reply (e.g. an HTML proxy page) shows no error detail.",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (error) { console.log(\"Body is not JSON:\", error.message); }",
+                  "pm.test(\"status is 200\", () => pm.expect(pm.response.code, JSON.stringify(body.error)).to.eql(200));",
                   "pm.test(\"at least 1 fuel stop\", () => pm.expect(body.fuel_stops.length).to.be.at.least(1));",
                   "pm.test(\"start fuel is not charged\", () => pm.expect(body.assumptions.start_fuel_charged).to.be.false);"
                 ]
